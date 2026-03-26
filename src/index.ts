@@ -1,7 +1,9 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
+import { isInitializeRequest } from "@modelcontextprotocol/sdk/types.js";
 import { z } from "zod";
 import http from "http";
+import { randomUUID } from "crypto";
 
 const KARBON_API_BASE = "https://api.karbonhq.com/v3";
 const KARBON_TOKEN = process.env.KARBON_ACCESS_KEY ?? "";
@@ -169,9 +171,12 @@ function createServer() {
   return server;
 }
 
+// Session store
+const sessions = new Map<string, { transport: StreamableHTTPServerTransport; server: McpServer }>();
+
 const httpServer = http.createServer(async (req, res) => {
   res.setHeader("Access-Control-Allow-Origin", "*");
-  res.setHeader("Access-Control-Allow-Methods", "GET, POST, OPTIONS, DELETE");
+  res.setHeader("Access-Control-Allow-Methods", "GET, POST, DELETE, OPTIONS");
   res.setHeader("Access-Control-Allow-Headers", "*");
 
   if (req.method === "OPTIONS") {
@@ -186,14 +191,55 @@ const httpServer = http.createServer(async (req, res) => {
     return;
   }
 
-  if (req.url === "/mcp") {
-    const transport = new StreamableHTTPServerTransport({
-      sessionIdGenerator: () => crypto.randomUUID(),
-    });
-    const server = createServer();
-    await server.connect(transport);
-    await transport.handleRequest(req, res);
-    return;
+  if (req.url === "/mcp" || req.url?.startsWith("/mcp?")) {
+    const sessionId = req.headers["mcp-session-id"] as string | undefined;
+
+    if (req.method === "POST") {
+      // Read body first
+      const chunks: Buffer[] = [];
+      await new Promise<void>((resolve) => {
+        req.on("data", (chunk) => chunks.push(chunk));
+        req.on("end", resolve);
+      });
+      const body = Buffer.concat(chunks).toString();
+      let parsed: unknown;
+      try { parsed = JSON.parse(body); } catch { res.writeHead(400); res.end("Bad JSON"); return; }
+
+      let session = sessionId ? sessions.get(sessionId) : undefined;
+
+      // New session on initialize
+      if (!session && isInitializeRequest(parsed)) {
+        const transport = new StreamableHTTPServerTransport({
+          sessionIdGenerator: () => randomUUID(),
+          onsessioninitialized: (id) => {
+            sessions.set(id, { transport, server: srv });
+          },
+        });
+        const srv = createServer();
+        await srv.connect(transport);
+        session = { transport, server: srv };
+        await transport.handleRequest(req, res, parsed);
+        return;
+      }
+
+      if (!session) { res.writeHead(400); res.end("No session"); return; }
+      await session.transport.handleRequest(req, res, parsed);
+      return;
+    }
+
+    if (req.method === "GET") {
+      if (!sessionId || !sessions.has(sessionId)) { res.writeHead(400); res.end("No session"); return; }
+      const session = sessions.get(sessionId)!;
+      await session.transport.handleRequest(req, res);
+      return;
+    }
+
+    if (req.method === "DELETE") {
+      if (sessionId) sessions.delete(sessionId);
+      res.writeHead(200);
+      res.end();
+      return;
+    }
   }
 
   res.writeHead(404);
