@@ -1,5 +1,5 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
-import { SSEServerTransport } from "@modelcontextprotocol/sdk/server/sse.js";
+import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { z } from "zod";
 import http from "http";
 
@@ -25,7 +25,9 @@ async function karbonFetch(path: string, options: RequestInit = {}): Promise<unk
   return res.json();
 }
 
-function registerTools(server: McpServer) {
+function createServer() {
+  const server = new McpServer({ name: "karbon-mcp", version: "1.0.0" });
+
   server.tool("list_contacts", "List contacts/clients from Karbon", {
     filter: z.string().optional().describe("OData filter string"),
     top: z.number().optional().default(20),
@@ -163,13 +165,13 @@ function registerTools(server: McpServer) {
     ]);
     return { content: [{ type: "text", text: JSON.stringify({ contacts, work }, null, 2) }] };
   });
-}
 
-const transports: Record<string, SSEServerTransport> = {};
+  return server;
+}
 
 const httpServer = http.createServer(async (req, res) => {
   res.setHeader("Access-Control-Allow-Origin", "*");
-  res.setHeader("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
+  res.setHeader("Access-Control-Allow-Methods", "GET, POST, OPTIONS, DELETE");
   res.setHeader("Access-Control-Allow-Headers", "*");
 
   if (req.method === "OPTIONS") {
@@ -178,36 +180,19 @@ const httpServer = http.createServer(async (req, res) => {
     return;
   }
 
-  if (req.url === "/sse" && req.method === "GET") {
-    const transport = new SSEServerTransport("/messages", res);
-    transports[transport.sessionId] = transport;
-    const server = new McpServer({ name: "karbon-mcp", version: "1.0.0" });
-    registerTools(server);
-    await server.connect(transport);
-    transport.onclose = () => delete transports[transport.sessionId];
-    return;
-  }
-
-  if (req.url?.startsWith("/messages") && req.method === "POST") {
-    const url = new URL(req.url, `http://localhost`);
-    const sessionId = url.searchParams.get("sessionId") ?? "";
-    const transport = transports[sessionId];
-    if (!transport) {
-      res.writeHead(404);
-      res.end("Session not found");
-      return;
-    }
-    const chunks: Buffer[] = [];
-    req.on("data", chunk => chunks.push(chunk));
-    req.on("end", async () => {
-      await transport.handlePostMessage(req, res);
-    });
-    return;
-  }
-
   if (req.url === "/health") {
     res.writeHead(200);
     res.end("OK");
+    return;
+  }
+
+  if (req.url === "/mcp") {
+    const transport = new StreamableHTTPServerTransport({
+      sessionIdGenerator: () => crypto.randomUUID(),
+    });
+    const server = createServer();
+    await server.connect(transport);
+    await transport.handleRequest(req, res);
     return;
   }
 
