@@ -4,156 +4,172 @@ import { isInitializeRequest } from "@modelcontextprotocol/sdk/types.js";
 import { z } from "zod";
 import http from "http";
 import { randomUUID } from "crypto";
-const KARBON_API_BASE = "https://api.karbonhq.com/v3";
-const KARBON_TOKEN = process.env.KARBON_ACCESS_KEY ?? "";
-const KARBON_GB_KEY = process.env.KARBON_GB_KEY ?? "";
+const BASE = "https://api.karbonhq.com/v3";
+const TOKEN = process.env.KARBON_ACCESS_KEY ?? "";
+const GB_KEY = process.env.KARBON_GB_KEY ?? "";
 const PORT = process.env.PORT ? parseInt(process.env.PORT) : 3000;
-async function karbonFetch(path, options = {}) {
-    const res = await fetch(`${KARBON_API_BASE}${path}`, {
-        ...options,
-        headers: {
-            "Content-Type": "application/json",
-            AccessKey: KARBON_TOKEN,
-            Authorization: `Bearer ${KARBON_GB_KEY}`,
-            ...(options.headers ?? {}),
-        },
+async function kFetch(path, opts = {}) {
+    const res = await fetch(`${BASE}${path}`, {
+        ...opts,
+        headers: { "Content-Type": "application/json", AccessKey: TOKEN, Authorization: `Bearer ${GB_KEY}`, ...(opts.headers ?? {}) },
     });
-    if (!res.ok) {
-        const text = await res.text();
-        throw new Error(`Karbon API error ${res.status}: ${text}`);
-    }
+    if (!res.ok)
+        throw new Error(`Karbon ${res.status}: ${await res.text()}`);
     return res.json();
 }
+function qs(params) {
+    const p = new URLSearchParams();
+    for (const [k, v] of Object.entries(params))
+        if (v !== undefined)
+            p.set(k, String(v));
+    return p.toString() ? `?${p}` : "";
+}
 function createServer() {
-    const server = new McpServer({ name: "karbon-mcp", version: "1.0.0" });
-    server.tool("list_contacts", "List contacts/clients from Karbon", {
-        filter: z.string().optional().describe("OData filter string"),
-        top: z.number().optional().default(20),
-        skip: z.number().optional().default(0),
+    const s = new McpServer({ name: "karbon-mcp", version: "2.0.0" });
+    // ── CONTACTS ──────────────────────────────────────────────────────────────
+    s.tool("list_contacts", "List contacts/clients from Karbon", {
+        filter: z.string().optional().describe("OData filter e.g. \"ContactType eq 'Client'\""),
+        top: z.number().optional().default(20), skip: z.number().optional().default(0),
     }, async ({ filter, top, skip }) => {
-        const params = new URLSearchParams({ $top: String(top), $skip: String(skip) });
-        if (filter)
-            params.set("$filter", filter);
-        const data = await karbonFetch(`/contacts?${params}`);
-        return { content: [{ type: "text", text: JSON.stringify(data, null, 2) }] };
+        const q = qs({ $top: top, $skip: skip, ...(filter ? { $filter: filter } : {}) });
+        return { content: [{ type: "text", text: JSON.stringify(await kFetch(`/contacts${q}`), null, 2) }] };
     });
-    server.tool("get_contact", "Get a single contact by their Karbon key", {
-        contactKey: z.string(),
-    }, async ({ contactKey }) => {
-        const data = await karbonFetch(`/contacts/${contactKey}`);
-        return { content: [{ type: "text", text: JSON.stringify(data, null, 2) }] };
-    });
-    server.tool("create_contact", "Create a new contact in Karbon", {
-        firstName: z.string().optional(),
-        lastName: z.string().optional(),
-        companyName: z.string().optional(),
-        email: z.string().optional(),
-        contactType: z.enum(["Person", "Company"]).default("Person"),
-    }, async (body) => {
-        const data = await karbonFetch("/contacts", { method: "POST", body: JSON.stringify(body) });
-        return { content: [{ type: "text", text: JSON.stringify(data, null, 2) }] };
-    });
-    server.tool("update_contact", "Update an existing contact in Karbon", {
-        contactKey: z.string(),
-        firstName: z.string().optional(),
-        lastName: z.string().optional(),
-        companyName: z.string().optional(),
-        email: z.string().optional(),
-    }, async ({ contactKey, ...fields }) => {
-        const data = await karbonFetch(`/contacts/${contactKey}`, { method: "PATCH", body: JSON.stringify(fields) });
-        return { content: [{ type: "text", text: JSON.stringify(data, null, 2) }] };
-    });
-    server.tool("list_work", "List work items from Karbon", {
-        filter: z.string().optional(),
-        top: z.number().optional().default(20),
-        skip: z.number().optional().default(0),
+    s.tool("get_contact", "Get a single contact by key", { contactKey: z.string() }, async ({ contactKey }) => ({ content: [{ type: "text", text: JSON.stringify(await kFetch(`/contacts/${contactKey}`), null, 2) }] }));
+    s.tool("create_contact", "Create a new contact", {
+        firstName: z.string(), lastName: z.string(),
+        email: z.string().optional(), contactType: z.string().optional().default("Client"),
+        clientOwner: z.string().optional(), clientManager: z.string().optional(),
+    }, async (body) => ({ content: [{ type: "text", text: JSON.stringify(await kFetch("/contacts", { method: "POST", body: JSON.stringify({ FirstName: body.firstName, LastName: body.lastName, ContactType: body.contactType, ClientOwner: body.clientOwner, ClientManager: body.clientManager }) }), null, 2) }] }));
+    s.tool("update_contact", "Update an existing contact", {
+        contactKey: z.string(), firstName: z.string().optional(), lastName: z.string().optional(),
+        salutation: z.string().optional(), preferredName: z.string().optional(),
+    }, async ({ contactKey, ...f }) => ({ content: [{ type: "text", text: JSON.stringify(await kFetch(`/contacts/${contactKey}`, { method: "PATCH", body: JSON.stringify(f) }), null, 2) }] }));
+    // ── ORGANIZATIONS ─────────────────────────────────────────────────────────
+    s.tool("list_organizations", "List organizations from Karbon", {
+        filter: z.string().optional(), top: z.number().optional().default(20), skip: z.number().optional().default(0),
     }, async ({ filter, top, skip }) => {
-        const params = new URLSearchParams({ $top: String(top), $skip: String(skip) });
+        const q = qs({ $top: top, $skip: skip, ...(filter ? { $filter: filter } : {}) });
+        return { content: [{ type: "text", text: JSON.stringify(await kFetch(`/organizations${q}`), null, 2) }] };
+    });
+    s.tool("get_organization", "Get a single organization by key", { organizationKey: z.string() }, async ({ organizationKey }) => ({ content: [{ type: "text", text: JSON.stringify(await kFetch(`/organizations/${organizationKey}`), null, 2) }] }));
+    s.tool("create_organization", "Create a new organization", {
+        fullName: z.string(), contactType: z.string().optional().default("Client"),
+        clientOwner: z.string().optional(), clientManager: z.string().optional(),
+    }, async (body) => ({ content: [{ type: "text", text: JSON.stringify(await kFetch("/organizations", { method: "POST", body: JSON.stringify({ FullName: body.fullName, ContactType: body.contactType, ClientOwner: body.clientOwner, ClientManager: body.clientManager }) }), null, 2) }] }));
+    // ── CLIENT GROUPS ─────────────────────────────────────────────────────────
+    s.tool("list_client_groups", "List client groups from Karbon", {
+        filter: z.string().optional(), top: z.number().optional().default(20), skip: z.number().optional().default(0),
+    }, async ({ filter, top, skip }) => {
+        const q = qs({ $top: top, $skip: skip, ...(filter ? { $filter: filter } : {}) });
+        return { content: [{ type: "text", text: JSON.stringify(await kFetch(`/clientgroups${q}`), null, 2) }] };
+    });
+    s.tool("get_client_group", "Get a single client group by key", { clientGroupKey: z.string() }, async ({ clientGroupKey }) => ({ content: [{ type: "text", text: JSON.stringify(await kFetch(`/clientgroups/${clientGroupKey}`), null, 2) }] }));
+    // ── WORK ITEMS ────────────────────────────────────────────────────────────
+    s.tool("list_work", "List work items from Karbon", {
+        filter: z.string().optional().describe("e.g. \"WorkStatus eq 'InProgress'\" or \"PrimaryStatus eq 'Planned'\""),
+        top: z.number().optional().default(20), skip: z.number().optional().default(0),
+    }, async ({ filter, top, skip }) => {
+        const q = qs({ $top: top, $skip: skip, ...(filter ? { $filter: filter } : {}) });
+        return { content: [{ type: "text", text: JSON.stringify(await kFetch(`/workitems${q}`), null, 2) }] };
+    });
+    s.tool("get_work", "Get a single work item by key", { workKey: z.string() }, async ({ workKey }) => ({ content: [{ type: "text", text: JSON.stringify(await kFetch(`/workitems/${workKey}`), null, 2) }] }));
+    s.tool("create_work", "Create a new work item", {
+        title: z.string(), clientKey: z.string(), clientType: z.enum(["Contact", "Organization", "ClientGroup"]),
+        assigneeEmail: z.string().optional(), workType: z.string().optional(),
+        startDate: z.string().optional(), dueDate: z.string().optional(),
+        workTemplateKey: z.string().optional(),
+    }, async (b) => ({ content: [{ type: "text", text: JSON.stringify(await kFetch("/workitems", { method: "POST", body: JSON.stringify({ Title: b.title, ClientKey: b.clientKey, ClientType: b.clientType, AssigneeEmailAddress: b.assigneeEmail, WorkType: b.workType, StartDate: b.startDate, DueDate: b.dueDate, WorkTemplateKey: b.workTemplateKey }) }), null, 2) }] }));
+    s.tool("update_work_status", "Update the primary status of a work item", {
+        workKey: z.string(), primaryStatus: z.enum(["Planned", "ReadyToStart", "InProgress", "Waiting", "Completed"]),
+    }, async ({ workKey, primaryStatus }) => ({ content: [{ type: "text", text: JSON.stringify(await kFetch(`/workitems/${workKey}`, { method: "PUT", body: JSON.stringify({ PrimaryStatus: primaryStatus }) }), null, 2) }] }));
+    s.tool("update_work_deadline", "Update the deadline date of a work item", {
+        workKey: z.string(), deadlineDate: z.string().describe("ISO 8601 date e.g. 2026-06-30"),
+    }, async ({ workKey, deadlineDate }) => ({ content: [{ type: "text", text: JSON.stringify(await kFetch(`/workitems/${workKey}`, { method: "PATCH", body: JSON.stringify({ DeadlineDate: deadlineDate }) }), null, 2) }] }));
+    s.tool("list_work_tasks", "List tasks within a work item", { workKey: z.string() }, async ({ workKey }) => ({ content: [{ type: "text", text: JSON.stringify(await kFetch(`/workitems/${workKey}/tasks`), null, 2) }] }));
+    s.tool("update_task", "Update a task within a work item", {
+        workKey: z.string(), taskKey: z.string(),
+        isCompleted: z.boolean().optional(), assigneeKey: z.string().optional(), dueDate: z.string().optional(),
+    }, async ({ workKey, taskKey, ...f }) => ({ content: [{ type: "text", text: JSON.stringify(await kFetch(`/workitems/${workKey}/tasks/${taskKey}`, { method: "PATCH", body: JSON.stringify(f) }), null, 2) }] }));
+    // ── WORK TEMPLATES ────────────────────────────────────────────────────────
+    s.tool("list_work_templates", "List available work templates", { top: z.number().optional().default(20) }, async ({ top }) => ({ content: [{ type: "text", text: JSON.stringify(await kFetch(`/worktemplates?$top=${top}`), null, 2) }] }));
+    // ── TIMESHEETS & TIME ENTRIES ─────────────────────────────────────────────
+    s.tool("list_timesheets", "List timesheets — optionally filter by date range, user or work item", {
+        filter: z.string().optional().describe("OData filter e.g. \"StartDate ge 2026-01-01T00:00:00Z\" or \"UserKey eq 'abc'\""),
+        includeTimeEntries: z.boolean().optional().default(false).describe("Set true to include individual time entries"),
+        top: z.number().optional().default(20), skip: z.number().optional().default(0),
+    }, async ({ filter, includeTimeEntries, top, skip }) => {
+        const params = { $top: top, $skip: skip };
         if (filter)
-            params.set("$filter", filter);
-        const data = await karbonFetch(`/work?${params}`);
-        return { content: [{ type: "text", text: JSON.stringify(data, null, 2) }] };
+            params.$filter = filter;
+        if (includeTimeEntries)
+            params.$expand = "TimeEntries";
+        return { content: [{ type: "text", text: JSON.stringify(await kFetch(`/timesheets${qs(params)}`), null, 2) }] };
     });
-    server.tool("get_work", "Get a single work item by its key", {
-        workKey: z.string(),
-    }, async ({ workKey }) => {
-        const data = await karbonFetch(`/work/${workKey}`);
-        return { content: [{ type: "text", text: JSON.stringify(data, null, 2) }] };
+    s.tool("get_timesheet", "Get a single timesheet with its time entries", {
+        timesheetKey: z.string(), includeTimeEntries: z.boolean().optional().default(true),
+    }, async ({ timesheetKey, includeTimeEntries }) => {
+        const q = includeTimeEntries ? "?$expand=TimeEntries" : "";
+        return { content: [{ type: "text", text: JSON.stringify(await kFetch(`/timesheets/${timesheetKey}${q}`), null, 2) }] };
     });
-    server.tool("create_work", "Create a new work item in Karbon", {
-        title: z.string(),
-        clientKey: z.string(),
-        assigneeKey: z.string().optional(),
+    // ── NOTES ─────────────────────────────────────────────────────────────────
+    s.tool("get_note", "Get a single note by its ID", { noteId: z.string() }, async ({ noteId }) => ({ content: [{ type: "text", text: JSON.stringify(await kFetch(`/notes/${noteId}`), null, 2) }] }));
+    s.tool("create_note", "Create a note and link it to a work item, contact, or organization", {
+        subject: z.string(), body: z.string(),
+        authorEmail: z.string().describe("Email of the Karbon user creating the note"),
+        assigneeEmail: z.string().optional(),
+        entityType: z.enum(["WorkItem", "Contact", "Organization", "ClientGroup"]).optional(),
+        entityKey: z.string().optional(),
         dueDate: z.string().optional(),
-        workTypeKey: z.string().optional(),
-    }, async (body) => {
-        const data = await karbonFetch("/work", { method: "POST", body: JSON.stringify(body) });
-        return { content: [{ type: "text", text: JSON.stringify(data, null, 2) }] };
+    }, async (b) => {
+        const timelines = b.entityType && b.entityKey ? [{ EntityType: b.entityType, EntityKey: b.entityKey }] : [];
+        return { content: [{ type: "text", text: JSON.stringify(await kFetch("/notes", { method: "POST", body: JSON.stringify({ Subject: b.subject, Body: b.body, AuthorEmailAddress: b.authorEmail, AssigneeEmailAddress: b.assigneeEmail, DueDate: b.dueDate, Timelines: timelines }) }), null, 2) }] };
     });
-    server.tool("update_work_status", "Update the status of a work item", {
-        workKey: z.string(),
-        status: z.enum(["Planned", "InProgress", "Completed", "Cancelled", "OnHold"]),
-    }, async ({ workKey, status }) => {
-        const data = await karbonFetch(`/work/${workKey}`, { method: "PATCH", body: JSON.stringify({ WorkStatus: status }) });
-        return { content: [{ type: "text", text: JSON.stringify(data, null, 2) }] };
+    // ── INVOICES ──────────────────────────────────────────────────────────────
+    s.tool("list_invoices", "List invoices from Karbon", {
+        top: z.number().optional().default(20), skip: z.number().optional().default(0),
+        orderBy: z.string().optional().describe("e.g. 'InvoiceDate desc'"),
+    }, async ({ top, skip, orderBy }) => {
+        const params = { $top: top, $skip: skip };
+        if (orderBy)
+            params.$orderby = orderBy;
+        return { content: [{ type: "text", text: JSON.stringify(await kFetch(`/invoices${qs(params)}`), null, 2) }] };
     });
-    server.tool("list_work_tasks", "List tasks within a specific work item", {
-        workKey: z.string(),
-    }, async ({ workKey }) => {
-        const data = await karbonFetch(`/work/${workKey}/tasks`);
-        return { content: [{ type: "text", text: JSON.stringify(data, null, 2) }] };
-    });
-    server.tool("update_task", "Update a task within a work item", {
-        workKey: z.string(),
-        taskKey: z.string(),
-        isCompleted: z.boolean().optional(),
-        assigneeKey: z.string().optional(),
-        dueDate: z.string().optional(),
-    }, async ({ workKey, taskKey, ...fields }) => {
-        const data = await karbonFetch(`/work/${workKey}/tasks/${taskKey}`, { method: "PATCH", body: JSON.stringify(fields) });
-        return { content: [{ type: "text", text: JSON.stringify(data, null, 2) }] };
-    });
-    server.tool("list_work_templates", "List available work templates in Karbon", {
-        top: z.number().optional().default(20),
-    }, async ({ top }) => {
-        const data = await karbonFetch(`/workTemplates?$top=${top}`);
-        return { content: [{ type: "text", text: JSON.stringify(data, null, 2) }] };
-    });
-    server.tool("move_work_to_stage", "Move a work item to a different workflow stage", {
-        workKey: z.string(),
-        stageKey: z.string(),
-    }, async ({ workKey, stageKey }) => {
-        const data = await karbonFetch(`/work/${workKey}`, { method: "PATCH", body: JSON.stringify({ WorkflowStageKey: stageKey }) });
-        return { content: [{ type: "text", text: JSON.stringify(data, null, 2) }] };
-    });
-    server.tool("list_team_members", "List team members in Karbon", {
+    s.tool("get_invoice", "Get a single invoice with line items and payments", { invoiceKey: z.string() }, async ({ invoiceKey }) => ({ content: [{ type: "text", text: JSON.stringify(await kFetch(`/invoices/${invoiceKey}?$expand=LineItems,Payments`), null, 2) }] }));
+    // ── ESTIMATE SUMMARIES ────────────────────────────────────────────────────
+    s.tool("get_estimate_summary", "Get budget vs actual time estimates for a work item", { workItemKey: z.string() }, async ({ workItemKey }) => ({ content: [{ type: "text", text: JSON.stringify(await kFetch(`/estimatesummaries/${workItemKey}`), null, 2) }] }));
+    // ── TENANT SETTINGS ───────────────────────────────────────────────────────
+    s.tool("get_tenant_settings", "Get your Karbon account settings — work types, work statuses, contact types", {}, async () => ({ content: [{ type: "text", text: JSON.stringify(await kFetch("/tenantsettings"), null, 2) }] }));
+    // ── USERS ─────────────────────────────────────────────────────────────────
+    s.tool("list_users", "List users in your Karbon account", {
+        filter: z.string().optional().describe("e.g. \"Name eq 'Jane Smith'\""),
         top: z.number().optional().default(50),
-    }, async ({ top }) => {
-        const data = await karbonFetch(`/teamMembers?$top=${top}`);
-        return { content: [{ type: "text", text: JSON.stringify(data, null, 2) }] };
+    }, async ({ filter, top }) => {
+        const q = qs({ $top: top, ...(filter ? { $filter: filter } : {}) });
+        return { content: [{ type: "text", text: JSON.stringify(await kFetch(`/users${q}`), null, 2) }] };
     });
-    server.tool("get_work_summary", "Get a summary of work across statuses", {}, async () => {
-        const statuses = ["Planned", "InProgress", "OnHold"];
+    s.tool("get_user", "Get details for a single user", { userId: z.string() }, async ({ userId }) => ({ content: [{ type: "text", text: JSON.stringify(await kFetch(`/users/${userId}`), null, 2) }] }));
+    s.tool("list_team_members", "List team members (simplified user list)", { top: z.number().optional().default(50) }, async ({ top }) => ({ content: [{ type: "text", text: JSON.stringify(await kFetch(`/users?$top=${top}`), null, 2) }] }));
+    // ── DASHBOARD & SEARCH ────────────────────────────────────────────────────
+    s.tool("get_work_summary", "Get a dashboard summary of work across all statuses", {}, async () => {
+        const statuses = ["Planned", "ReadyToStart", "InProgress", "Waiting", "Completed"];
         const results = {};
-        await Promise.all(statuses.map(async (s) => {
-            const data = await karbonFetch(`/work?$filter=WorkStatus eq '${s}'&$top=100&$select=Title,WorkStatus,DueDate,AssigneeKey`);
-            results[s] = data;
+        await Promise.all(statuses.map(async (st) => {
+            results[st] = await kFetch(`/workitems?$filter=PrimaryStatus eq '${st}'&$top=100&$select=Title,WorkType,PrimaryStatus,DueDate,AssigneeEmailAddress,ClientName`);
         }));
         return { content: [{ type: "text", text: JSON.stringify(results, null, 2) }] };
     });
-    server.tool("search_karbon", "Search across contacts and work items by keyword", {
-        query: z.string(),
-    }, async ({ query }) => {
-        const encoded = encodeURIComponent(query);
-        const [contacts, work] = await Promise.all([
-            karbonFetch(`/contacts?$filter=contains(FullName,'${encoded}')&$top=10`),
-            karbonFetch(`/work?$filter=contains(Title,'${encoded}')&$top=10`),
+    s.tool("search_karbon", "Search contacts, organizations and work items by keyword", { query: z.string() }, async ({ query }) => {
+        const enc = encodeURIComponent(query);
+        const [contacts, orgs, work] = await Promise.all([
+            kFetch(`/contacts?$filter=contains(FullName,'${enc}')&$top=10`),
+            kFetch(`/organizations?$filter=contains(FullName,'${enc}')&$top=10`),
+            kFetch(`/workitems?$filter=contains(Title,'${enc}')&$top=10`),
         ]);
-        return { content: [{ type: "text", text: JSON.stringify({ contacts, work }, null, 2) }] };
+        return { content: [{ type: "text", text: JSON.stringify({ contacts, organizations: orgs, work }, null, 2) }] };
     });
-    return server;
+    return s;
 }
-// Session store
+// ── HTTP server with session management ──────────────────────────────────────
 const sessions = new Map();
 const httpServer = http.createServer(async (req, res) => {
     res.setHeader("Access-Control-Allow-Origin", "*");
@@ -172,16 +188,11 @@ const httpServer = http.createServer(async (req, res) => {
     if (req.url === "/mcp" || req.url?.startsWith("/mcp?")) {
         const sessionId = req.headers["mcp-session-id"];
         if (req.method === "POST") {
-            // Read body first
             const chunks = [];
-            await new Promise((resolve) => {
-                req.on("data", (chunk) => chunks.push(chunk));
-                req.on("end", resolve);
-            });
-            const body = Buffer.concat(chunks).toString();
+            await new Promise(r => { req.on("data", c => chunks.push(c)); req.on("end", r); });
             let parsed;
             try {
-                parsed = JSON.parse(body);
+                parsed = JSON.parse(Buffer.concat(chunks).toString());
             }
             catch {
                 res.writeHead(400);
@@ -189,13 +200,10 @@ const httpServer = http.createServer(async (req, res) => {
                 return;
             }
             let session = sessionId ? sessions.get(sessionId) : undefined;
-            // New session on initialize
             if (!session && isInitializeRequest(parsed)) {
                 const transport = new StreamableHTTPServerTransport({
                     sessionIdGenerator: () => randomUUID(),
-                    onsessioninitialized: (id) => {
-                        sessions.set(id, { transport, server: srv });
-                    },
+                    onsessioninitialized: (id) => { sessions.set(id, { transport, server: srv }); },
                 });
                 const srv = createServer();
                 await srv.connect(transport);
@@ -217,8 +225,7 @@ const httpServer = http.createServer(async (req, res) => {
                 res.end("No session");
                 return;
             }
-            const session = sessions.get(sessionId);
-            await session.transport.handleRequest(req, res);
+            await sessions.get(sessionId).transport.handleRequest(req, res);
             return;
         }
         if (req.method === "DELETE") {
@@ -232,6 +239,4 @@ const httpServer = http.createServer(async (req, res) => {
     res.writeHead(404);
     res.end("Not found");
 });
-httpServer.listen(PORT, () => {
-    console.log(`Karbon MCP server running on port ${PORT}`);
-});
+httpServer.listen(PORT, () => console.log(`Karbon MCP server running on port ${PORT}`));
