@@ -292,7 +292,10 @@ function createServer() {
   });
 
   // ── SAFE FEE & BUDGET UPDATE ────────────────────────────────────────────
-  s.tool("update_karbon_workitem_fee_budget", "Safely update FeeSettings and/or EstimatedBudget on a Karbon Work Item. Fetches the existing item, modifies only the requested fields, preserves all others, and returns before/after values. Requires a `reason` for auditability.", {
+  // Updates FeeSettings and/or budget on a Karbon Work Item, then re-fetches
+  // the item and verifies the values actually persisted. Returns success only
+  // when the GET-after-PUT confirms the change.
+  s.tool("update_karbon_workitem_fee_budget", "Safely update FeeSettings and/or budget on a Karbon Work Item. Fetches the existing item, modifies only the requested fields, preserves all others, PUTs the update, then GETs again to verify the values persisted. Returns success only on verified persistence. Requires a `reason` for auditability.", {
     workItemKey: z.string(),
     feeType: z.string().optional().describe("e.g. 'Fixed', 'TimeAndMaterials', 'NotBillable'"),
     feeValue: z.number().optional().describe("Numeric fee amount; pairs with feeType when relevant"),
@@ -306,18 +309,25 @@ function createServer() {
       return { content: [{ type: "text", text: JSON.stringify({ error: "`reason` is required and must be non-empty." }, null, 2) }] };
     }
 
+    // Helper: pull whichever budget field Karbon actually populates
+    const readBudget = (obj: Record<string, unknown>): number | null => {
+      const v = (obj.EstimatedBudgetMinutes ?? obj.EstimatedBudget) as number | null | undefined;
+      return v === undefined ? null : v;
+    };
+
     // 1. Fetch current work item
     const current = await kFetch(`/workitems/${workItemKey}`) as Record<string, unknown>;
     const beforeFeeSettings = current.FeeSettings ?? null;
-    const beforeEstimatedBudget = current.EstimatedBudget ?? null;
+    const beforeBudget = readBudget(current);
 
     // 2. Build payload preserving every existing field
     const payload: Record<string, unknown> = { ...current };
-    // Strip OData metadata that shouldn't be echoed back
     delete payload["@odata.context"];
     delete payload["@odata.type"];
+    // Ensure WorkItemKey is explicit in the payload as well as the URL
+    payload.WorkItemKey = workItemKey;
 
-    // 3. Only modify FeeSettings and EstimatedBudget
+    // 3. Only modify FeeSettings and budget
     if (feeType !== undefined || feeValue !== undefined) {
       const existingFee = (current.FeeSettings as Record<string, unknown> | null | undefined) ?? {};
       payload.FeeSettings = {
@@ -327,11 +337,19 @@ function createServer() {
       };
     }
     if (estimatedBudgetMinutes !== undefined) {
+      // Karbon's documented field appears to be EstimatedBudgetMinutes (PascalCase).
+      // Set both names to be safe across API versions; whichever Karbon uses wins.
+      payload.EstimatedBudgetMinutes = estimatedBudgetMinutes;
       payload.EstimatedBudget = estimatedBudgetMinutes;
     }
 
     // 4. PUT the update — capture raw error body if Karbon rejects
     const url = `${BASE}/workitems/${encodeURIComponent(workItemKey)}`;
+    const requestBody = JSON.stringify(payload);
+    // TEMPORARY DEBUG: log the raw request body to stderr (no headers, no tokens).
+    // Remove once the budget write is confirmed working.
+    console.error(`[debug update_karbon_workitem_fee_budget] PUT ${url} body=${requestBody}`);
+
     const res = await fetch(url, {
       method: "PUT",
       headers: {
@@ -340,22 +358,58 @@ function createServer() {
         Authorization: `Bearer ${GB_KEY}`,
         Accept: "application/json",
       },
-      body: JSON.stringify(payload),
+      body: requestBody,
     });
     const respText = await res.text();
     if (!res.ok) {
-      return { content: [{ type: "text", text: JSON.stringify({ ok: false, status: res.status, error: respText, before: { FeeSettings: beforeFeeSettings, EstimatedBudget: beforeEstimatedBudget } }, null, 2) }] };
+      return { content: [{ type: "text", text: JSON.stringify({
+        ok: false,
+        stage: "PUT",
+        status: res.status,
+        error: respText,
+        before: { FeeSettings: beforeFeeSettings, EstimatedBudgetMinutes: beforeBudget },
+      }, null, 2) }] };
     }
-    let updated: Record<string, unknown> = {};
-    try { updated = respText ? JSON.parse(respText) : {}; } catch { updated = { raw: respText }; }
+
+    // 5. Verify by re-fetching — Karbon's PUT often returns 204, so we cannot
+    //    trust the PUT response body. Only persisted values are reported.
+    const verified = await kFetch(`/workitems/${workItemKey}`) as Record<string, unknown>;
+    const afterFeeSettings = (verified.FeeSettings ?? null) as Record<string, unknown> | null;
+    const afterBudget = readBudget(verified);
+
+    const failures: string[] = [];
+    if (estimatedBudgetMinutes !== undefined && afterBudget !== estimatedBudgetMinutes) {
+      failures.push(`EstimatedBudgetMinutes did not persist: expected=${estimatedBudgetMinutes} actual=${afterBudget}`);
+    }
+    if (feeType !== undefined && (afterFeeSettings?.FeeType ?? null) !== feeType) {
+      failures.push(`FeeSettings.FeeType did not persist: expected=${feeType} actual=${String(afterFeeSettings?.FeeType ?? null)}`);
+    }
+    if (feeValue !== undefined && (afterFeeSettings?.FeeValue ?? null) !== feeValue) {
+      failures.push(`FeeSettings.FeeValue did not persist: expected=${feeValue} actual=${String(afterFeeSettings?.FeeValue ?? null)}`);
+    }
+
+    if (failures.length > 0) {
+      return { content: [{ type: "text", text: JSON.stringify({
+        ok: false,
+        stage: "verification",
+        putStatus: res.status,
+        message: "Karbon accepted the PUT but the requested values did not persist on re-fetch.",
+        failures,
+        reason,
+        workItemKey,
+        before: { FeeSettings: beforeFeeSettings, EstimatedBudgetMinutes: beforeBudget },
+        after:  { FeeSettings: afterFeeSettings,  EstimatedBudgetMinutes: afterBudget },
+      }, null, 2) }] };
+    }
 
     return { content: [{ type: "text", text: JSON.stringify({
       ok: true,
-      status: res.status,
+      verified: true,
+      putStatus: res.status,
       reason,
       workItemKey,
-      before: { FeeSettings: beforeFeeSettings, EstimatedBudget: beforeEstimatedBudget },
-      after: { FeeSettings: updated.FeeSettings ?? payload.FeeSettings, EstimatedBudget: updated.EstimatedBudget ?? payload.EstimatedBudget },
+      before: { FeeSettings: beforeFeeSettings, EstimatedBudgetMinutes: beforeBudget },
+      after:  { FeeSettings: afterFeeSettings,  EstimatedBudgetMinutes: afterBudget },
     }, null, 2) }] };
   });
 
