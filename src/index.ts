@@ -208,6 +208,89 @@ function createServer() {
     return { content: [{ type: "text", text: JSON.stringify({ contacts, organizations: orgs, work }, null, 2) }] };
   });
 
+  // ── ESTIMATE SUMMARY: PREVIEW-ONLY ──────────────────────────────────────
+  // Karbon's documented v3 API does not expose a write endpoint for
+  // EstimateSummaries — they can only be edited in the Karbon UI.
+  // This tool fetches the current rows, matches by Role/TaskType, and shows
+  // before/after EstimateMinutes so you can see exactly what to change manually.
+  s.tool("preview_karbon_estimate_summary_update", "Preview proposed EstimateMinutes changes on a Karbon Work Item's Estimate Summary, matching by RoleKey/TaskTypeKey (preferred) or RoleName/TaskTypeName. NO WRITES — Karbon's documented API does not allow updating EstimateSummary rows; this is a read-only diff to support manual edits in the Karbon UI.", {
+    workItemKey: z.string(),
+    estimates: z.array(z.object({
+      roleName: z.string().optional(),
+      roleKey: z.string().optional(),
+      taskTypeName: z.string().optional(),
+      taskTypeKey: z.string().optional(),
+      estimateMinutes: z.number(),
+    })).min(1),
+    reason: z.string().describe("Reason for the proposed change — for auditability/notes"),
+  }, async ({ workItemKey, estimates, reason }) => {
+    if (!reason || !reason.trim()) {
+      return { content: [{ type: "text", text: JSON.stringify({ error: "`reason` is required and must be non-empty." }, null, 2) }] };
+    }
+    for (const e of estimates) {
+      const hasRole = e.roleKey || e.roleName;
+      const hasTask = e.taskTypeKey || e.taskTypeName;
+      if (!hasRole && !hasTask) {
+        return { content: [{ type: "text", text: JSON.stringify({ error: "Each estimate entry must include at least one of roleKey/roleName or taskTypeKey/taskTypeName for matching." }, null, 2) }] };
+      }
+    }
+
+    // Fetch current estimate summary
+    const current = await kFetch(`/estimatesummaries/${workItemKey}`) as Record<string, unknown>;
+    const rowsRaw = (current.value as unknown[] | undefined)
+      ?? (current.EstimateSummaries as unknown[] | undefined)
+      ?? (Array.isArray(current) ? current as unknown[] : undefined);
+    const rows = (rowsRaw ?? []) as Record<string, unknown>[];
+
+    // Match each requested estimate to a row
+    const matches = estimates.map((e) => {
+      let idx = -1;
+      if (e.roleKey || e.taskTypeKey) {
+        idx = rows.findIndex((r) =>
+          (e.roleKey ? r.RoleKey === e.roleKey : true) &&
+          (e.taskTypeKey ? r.TaskTypeKey === e.taskTypeKey : true)
+        );
+      }
+      if (idx === -1 && (e.roleName || e.taskTypeName)) {
+        idx = rows.findIndex((r) =>
+          (e.roleName ? (r.RoleName === e.roleName || r.Role === e.roleName) : true) &&
+          (e.taskTypeName ? (r.TaskTypeName === e.taskTypeName || r.TaskType === e.taskTypeName) : true)
+        );
+      }
+      return { input: e, row: idx >= 0 ? rows[idx] : null };
+    });
+
+    const matchedRows = matches
+      .filter((m) => m.row !== null)
+      .map((m) => {
+        const before = m.row as Record<string, unknown>;
+        const beforeMinutes = (before.EstimateMinutes ?? null) as number | null;
+        const afterMinutes = m.input.estimateMinutes;
+        return {
+          roleKey: before.RoleKey ?? null,
+          roleName: before.RoleName ?? before.Role ?? null,
+          taskTypeKey: before.TaskTypeKey ?? null,
+          taskTypeName: before.TaskTypeName ?? before.TaskType ?? null,
+          before: { EstimateMinutes: beforeMinutes, ActualMinutes: before.ActualMinutes ?? null, HourlyRate: before.HourlyRate ?? null },
+          after:  { EstimateMinutes: afterMinutes,  ActualMinutes: before.ActualMinutes ?? null, HourlyRate: before.HourlyRate ?? null },
+          delta: beforeMinutes !== null ? afterMinutes - beforeMinutes : null,
+        };
+      });
+
+    const unmatched = matches.filter((m) => m.row === null).map((m) => m.input);
+
+    return { content: [{ type: "text", text: JSON.stringify({
+      ok: true,
+      preview: true,
+      writable: false,
+      message: "Karbon's documented v3 API does not expose a write endpoint for EstimateSummaries. No changes were made. Apply these edits manually in the Karbon UI.",
+      reason,
+      workItemKey,
+      matchedRows,
+      unmatched,
+    }, null, 2) }] };
+  });
+
   // ── SAFE FEE & BUDGET UPDATE ────────────────────────────────────────────
   s.tool("update_karbon_workitem_fee_budget", "Safely update FeeSettings and/or EstimatedBudget on a Karbon Work Item. Fetches the existing item, modifies only the requested fields, preserves all others, and returns before/after values. Requires a `reason` for auditability.", {
     workItemKey: z.string(),
