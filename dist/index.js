@@ -180,6 +180,39 @@ const httpServer = http.createServer(async (req, res) => {
         res.end();
         return;
     }
+    // ── TEMPORARY: Karbon Work Item debug endpoint ──────────────────────
+    // Fetches a single Karbon Work Item so the raw JSON can be inspected.
+    // REMOVE once inspection is complete. Does not log sensitive data.
+    {
+        const m = req.url ? req.url.match(/^\/test-karbon-workitem\/([^/?#]+)/) : null;
+        if (m) {
+            if (req.method !== "GET") {
+                res.writeHead(405, { "Allow": "GET" });
+                res.end("Method Not Allowed");
+                return;
+            }
+            try {
+                const workItemKey = decodeURIComponent(m[1]);
+                const upstream = await fetch(`https://api.karbonhq.com/v3/WorkItems/${encodeURIComponent(workItemKey)}`, {
+                    method: "GET",
+                    headers: {
+                        AccessKey: process.env.KARBON_ACCESS_KEY ?? "",
+                        Authorization: `Bearer ${process.env.KARBON_GB_KEY ?? ""}`,
+                        Accept: "application/json",
+                    },
+                });
+                const body = await upstream.text();
+                const ct = upstream.headers.get("content-type") ?? "application/json";
+                res.writeHead(upstream.status, { "Content-Type": ct });
+                res.end(body);
+            } catch (err) {
+                res.writeHead(500, { "Content-Type": "application/json" });
+                res.end(JSON.stringify({ error: "Failed to fetch Karbon Work Item", message: err.message }));
+            }
+            return;
+        }
+    }
+    // ── END TEMPORARY ───────────────────────────────────────────────────
     if (req.url === "/health") {
         res.writeHead(200);
         res.end("OK");
