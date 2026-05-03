@@ -167,6 +167,63 @@ function createServer() {
         ]);
         return { content: [{ type: "text", text: JSON.stringify({ contacts, organizations: orgs, work }, null, 2) }] };
     });
+    // ── SAFE FEE & BUDGET UPDATE ────────────────────────────────────────────
+    s.tool("update_karbon_workitem_fee_budget", "Safely update FeeSettings and/or EstimatedBudget on a Karbon Work Item. Fetches the existing item, modifies only the requested fields, preserves all others, and returns before/after values. Requires a `reason` for auditability.", {
+        workItemKey: z.string(),
+        feeType: z.string().optional().describe("e.g. 'Fixed', 'TimeAndMaterials', 'NotBillable'"),
+        feeValue: z.number().optional().describe("Numeric fee amount; pairs with feeType when relevant"),
+        estimatedBudgetMinutes: z.number().optional().describe("Estimated budget in minutes"),
+        reason: z.string().describe("Reason for the change — required for auditability"),
+    }, async ({ workItemKey, feeType, feeValue, estimatedBudgetMinutes, reason }) => {
+        if (feeType === undefined && feeValue === undefined && estimatedBudgetMinutes === undefined) {
+            return { content: [{ type: "text", text: JSON.stringify({ error: "No changes requested. Provide at least one of: feeType, feeValue, estimatedBudgetMinutes." }, null, 2) }] };
+        }
+        if (!reason || !reason.trim()) {
+            return { content: [{ type: "text", text: JSON.stringify({ error: "`reason` is required and must be non-empty." }, null, 2) }] };
+        }
+        const current = await kFetch(`/workitems/${workItemKey}`);
+        const beforeFeeSettings = current.FeeSettings ?? null;
+        const beforeEstimatedBudget = current.EstimatedBudget ?? null;
+        const payload = { ...current };
+        delete payload["@odata.context"];
+        delete payload["@odata.type"];
+        if (feeType !== undefined || feeValue !== undefined) {
+            const existingFee = current.FeeSettings ?? {};
+            payload.FeeSettings = {
+                ...existingFee,
+                ...(feeType !== undefined ? { FeeType: feeType } : {}),
+                ...(feeValue !== undefined ? { FeeValue: feeValue } : {}),
+            };
+        }
+        if (estimatedBudgetMinutes !== undefined) {
+            payload.EstimatedBudget = estimatedBudgetMinutes;
+        }
+        const url = `${BASE}/workitems/${encodeURIComponent(workItemKey)}`;
+        const res = await fetch(url, {
+            method: "PUT",
+            headers: {
+                "Content-Type": "application/json",
+                AccessKey: TOKEN,
+                Authorization: `Bearer ${GB_KEY}`,
+                Accept: "application/json",
+            },
+            body: JSON.stringify(payload),
+        });
+        const respText = await res.text();
+        if (!res.ok) {
+            return { content: [{ type: "text", text: JSON.stringify({ ok: false, status: res.status, error: respText, before: { FeeSettings: beforeFeeSettings, EstimatedBudget: beforeEstimatedBudget } }, null, 2) }] };
+        }
+        let updated = {};
+        try { updated = respText ? JSON.parse(respText) : {}; } catch { updated = { raw: respText }; }
+        return { content: [{ type: "text", text: JSON.stringify({
+            ok: true,
+            status: res.status,
+            reason,
+            workItemKey,
+            before: { FeeSettings: beforeFeeSettings, EstimatedBudget: beforeEstimatedBudget },
+            after: { FeeSettings: updated.FeeSettings ?? payload.FeeSettings, EstimatedBudget: updated.EstimatedBudget ?? payload.EstimatedBudget },
+        }, null, 2) }] };
+    });
     return s;
 }
 // ── HTTP server with session management ──────────────────────────────────────
