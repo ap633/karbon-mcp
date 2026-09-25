@@ -25,7 +25,7 @@ function qs(params) {
     return p.toString() ? `?${p}` : "";
 }
 function createServer() {
-    const s = new McpServer({ name: "karbon-mcp", version: "2.0.0" });
+    const s = new McpServer({ name: "karbon-mcp", version: "2.1.0" });
     // ── CONTACTS ──────────────────────────────────────────────────────────────
     s.tool("list_contacts", "List contacts/clients from Karbon", {
         filter: z.string().optional().describe("OData filter e.g. \"ContactType eq 'Client'\""),
@@ -79,9 +79,24 @@ function createServer() {
         startDate: z.string().optional(), dueDate: z.string().optional(),
         workTemplateKey: z.string().optional(),
     }, async (b) => ({ content: [{ type: "text", text: JSON.stringify(await kFetch("/workitems", { method: "POST", body: JSON.stringify({ Title: b.title, ClientKey: b.clientKey, ClientType: b.clientType, AssigneeEmailAddress: b.assigneeEmail, WorkType: b.workType, StartDate: b.startDate, DueDate: b.dueDate, WorkTemplateKey: b.workTemplateKey }) }), null, 2) }] }));
-    s.tool("update_work_status", "Update the primary status of a work item", {
-        workKey: z.string(), primaryStatus: z.enum(["Planned", "ReadyToStart", "InProgress", "Waiting", "Completed"]),
-    }, async ({ workKey, primaryStatus }) => ({ content: [{ type: "text", text: JSON.stringify(await kFetch(`/workitems/${workKey}`, { method: "PUT", body: JSON.stringify({ PrimaryStatus: primaryStatus }) }), null, 2) }] }));
+    // BUGFIX: PrimaryStatus must use Karbon's display-format values (with spaces) —
+    // the camelCase forms ("ReadyToStart", "InProgress") are rejected by the API.
+    // Also, PrimaryStatus is NOT accepted by PATCH; it can only be set via a full
+    // PUT that includes the mandatory fields. So we fetch the current item,
+    // preserve all fields, set the new status, then PUT.
+    s.tool("update_work_status", "Update the primary status of a work item. Fetches the item, preserves all fields, sets the new status, and PUTs it back.", {
+        workKey: z.string(),
+        primaryStatus: z.enum(["Planned", "Ready To Start", "In Progress", "Waiting", "Completed"])
+            .describe("Karbon display-format status value (with spaces). camelCase forms are rejected by the API."),
+    }, async ({ workKey, primaryStatus }) => {
+        const current = await kFetch(`/workitems/${workKey}`);
+        const payload = { ...current };
+        delete payload["@odata.context"];
+        delete payload["@odata.type"];
+        payload.WorkItemKey = workKey;
+        payload.PrimaryStatus = primaryStatus;
+        return { content: [{ type: "text", text: JSON.stringify(await kFetch(`/workitems/${workKey}`, { method: "PUT", body: JSON.stringify(payload) }), null, 2) }] };
+    });
     s.tool("update_work_deadline", "Update the deadline date of a work item", {
         workKey: z.string(), deadlineDate: z.string().describe("ISO 8601 date e.g. 2026-06-30"),
     }, async ({ workKey, deadlineDate }) => ({ content: [{ type: "text", text: JSON.stringify(await kFetch(`/workitems/${workKey}`, { method: "PATCH", body: JSON.stringify({ DeadlineDate: deadlineDate }) }), null, 2) }] }));
@@ -151,7 +166,7 @@ function createServer() {
     s.tool("list_team_members", "List team members (simplified user list)", { top: z.number().optional().default(50) }, async ({ top }) => ({ content: [{ type: "text", text: JSON.stringify(await kFetch(`/users?$top=${top}`), null, 2) }] }));
     // ── DASHBOARD & SEARCH ────────────────────────────────────────────────────
     s.tool("get_work_summary", "Get a dashboard summary of work across all statuses", {}, async () => {
-        const statuses = ["Planned", "ReadyToStart", "InProgress", "Waiting", "Completed"];
+        const statuses = ["Planned", "Ready To Start", "In Progress", "Waiting", "Completed"];
         const results = {};
         await Promise.all(statuses.map(async (st) => {
             results[st] = await kFetch(`/workitems?$filter=PrimaryStatus eq '${st}'&$top=100&$select=Title,WorkType,PrimaryStatus,DueDate,AssigneeEmailAddress,ClientName`);
@@ -233,11 +248,9 @@ function createServer() {
             ...(verified ? {} : { error: "PATCH returned success but the new value did not read back." }),
         });
     });
-    // ── ESTIMATE SUMMARY: PREVIEW-ONLY ──────────────────────────────────────
-    // Karbon's documented v3 API does not expose a write endpoint for
-    // EstimateSummaries — they can only be edited in the Karbon UI.
-    // This tool fetches the current rows, matches by Role/TaskType, and shows
-    // before/after EstimateMinutes so you can see exactly what to change manually.
+    // ── ESTIMATE SUMMARY: PREVIEW ───────────────────────────────────────────
+    // Read-only diff of proposed changes across several rows, for review before
+    // writing. update_karbon_estimate_minutes performs a single-row write.
     s.tool("preview_karbon_estimate_summary_update", "Preview proposed EstimateMinutes changes on a Karbon Work Item's Estimate Summary, matching by RoleKey/TaskTypeKey (preferred) or RoleName/TaskTypeName. NO WRITES — a read-only diff for review. To write one row, use update_karbon_estimate_minutes.", {
         workItemKey: z.string(),
         estimates: z.array(z.object({
@@ -259,52 +272,52 @@ function createServer() {
                 return { content: [{ type: "text", text: JSON.stringify({ error: "Each estimate entry must include at least one of roleKey/roleName or taskTypeKey/taskTypeName for matching." }, null, 2) }] };
             }
         }
+        // Fetch current estimate summary
         const current = await kFetch(`/estimatesummaries/${workItemKey}`);
-        const rowsRaw = current.value ?? current.EstimateSummaries ?? (Array.isArray(current) ? current : undefined);
-        const rows = rowsRaw ?? [];
+        const rowsRaw = current.value
+            ?? current.EstimateSummaries
+            ?? (Array.isArray(current) ? current : undefined);
+        const rows = (rowsRaw ?? []);
+        // Match each requested estimate to a row
         const matches = estimates.map((e) => {
             let idx = -1;
             if (e.roleKey || e.taskTypeKey) {
-                idx = rows.findIndex((r) =>
-                    (e.roleKey ? r.RoleKey === e.roleKey : true) &&
-                    (e.taskTypeKey ? r.TaskTypeKey === e.taskTypeKey : true)
-                );
+                idx = rows.findIndex((r) => (e.roleKey ? r.RoleKey === e.roleKey : true) &&
+                    (e.taskTypeKey ? r.TaskTypeKey === e.taskTypeKey : true));
             }
             if (idx === -1 && (e.roleName || e.taskTypeName)) {
-                idx = rows.findIndex((r) =>
-                    (e.roleName ? (r.RoleName === e.roleName || r.Role === e.roleName) : true) &&
-                    (e.taskTypeName ? (r.TaskTypeName === e.taskTypeName || r.TaskType === e.taskTypeName) : true)
-                );
+                idx = rows.findIndex((r) => (e.roleName ? (r.RoleName === e.roleName || r.Role === e.roleName) : true) &&
+                    (e.taskTypeName ? (r.TaskTypeName === e.taskTypeName || r.TaskType === e.taskTypeName) : true));
             }
             return { input: e, row: idx >= 0 ? rows[idx] : null };
         });
         const matchedRows = matches
             .filter((m) => m.row !== null)
             .map((m) => {
-                const before = m.row;
-                const beforeMinutes = before.EstimateMinutes ?? null;
-                const afterMinutes = m.input.estimateMinutes;
-                return {
-                    roleKey: before.RoleKey ?? null,
-                    roleName: before.RoleName ?? before.Role ?? null,
-                    taskTypeKey: before.TaskTypeKey ?? null,
-                    taskTypeName: before.TaskTypeName ?? before.TaskType ?? null,
-                    before: { EstimateMinutes: beforeMinutes, ActualMinutes: before.ActualMinutes ?? null, HourlyRate: before.HourlyRate ?? null },
-                    after:  { EstimateMinutes: afterMinutes,  ActualMinutes: before.ActualMinutes ?? null, HourlyRate: before.HourlyRate ?? null },
-                    delta: beforeMinutes !== null ? afterMinutes - beforeMinutes : null,
-                };
-            });
+            const before = m.row;
+            const beforeMinutes = (before.EstimateMinutes ?? null);
+            const afterMinutes = m.input.estimateMinutes;
+            return {
+                roleKey: before.RoleKey ?? null,
+                roleName: before.RoleName ?? before.Role ?? null,
+                taskTypeKey: before.TaskTypeKey ?? null,
+                taskTypeName: before.TaskTypeName ?? before.TaskType ?? null,
+                before: { EstimateMinutes: beforeMinutes, ActualMinutes: before.ActualMinutes ?? null, HourlyRate: before.HourlyRate ?? null },
+                after: { EstimateMinutes: afterMinutes, ActualMinutes: before.ActualMinutes ?? null, HourlyRate: before.HourlyRate ?? null },
+                delta: beforeMinutes !== null ? afterMinutes - beforeMinutes : null,
+            };
+        });
         const unmatched = matches.filter((m) => m.row === null).map((m) => m.input);
         return { content: [{ type: "text", text: JSON.stringify({
-            ok: true,
-            preview: true,
-            writable: false,
-            message: "Preview only — no changes were made. To write a single row, use update_karbon_estimate_minutes.",
-            reason,
-            workItemKey,
-            matchedRows,
-            unmatched,
-        }, null, 2) }] };
+                        ok: true,
+                        preview: true,
+                        writable: false,
+                        message: "Preview only — no changes were made. To write a single row, use update_karbon_estimate_minutes.",
+                        reason,
+                        workItemKey,
+                        matchedRows,
+                        unmatched,
+                    }, null, 2) }] };
     });
     // ── SAFE FEE & BUDGET UPDATE ────────────────────────────────────────────
     // Updates FeeSettings and/or budget on a Karbon Work Item, then re-fetches
@@ -323,17 +336,22 @@ function createServer() {
         if (!reason || !reason.trim()) {
             return { content: [{ type: "text", text: JSON.stringify({ error: "`reason` is required and must be non-empty." }, null, 2) }] };
         }
+        // Helper: pull whichever budget field Karbon actually populates
         const readBudget = (obj) => {
-            const v = obj.EstimatedBudgetMinutes ?? obj.EstimatedBudget;
+            const v = (obj.EstimatedBudgetMinutes ?? obj.EstimatedBudget);
             return v === undefined ? null : v;
         };
+        // 1. Fetch current work item
         const current = await kFetch(`/workitems/${workItemKey}`);
         const beforeFeeSettings = current.FeeSettings ?? null;
         const beforeBudget = readBudget(current);
+        // 2. Build payload preserving every existing field
         const payload = { ...current };
         delete payload["@odata.context"];
         delete payload["@odata.type"];
+        // Ensure WorkItemKey is explicit in the payload as well as the URL
         payload.WorkItemKey = workItemKey;
+        // 3. Only modify FeeSettings and budget
         if (feeType !== undefined || feeValue !== undefined) {
             const existingFee = current.FeeSettings ?? {};
             payload.FeeSettings = {
@@ -348,11 +366,9 @@ function createServer() {
             payload.EstimatedBudgetMinutes = estimatedBudgetMinutes;
             payload.EstimatedBudget = estimatedBudgetMinutes;
         }
+        // 4. PUT the update — capture raw error body if Karbon rejects
         const url = `${BASE}/workitems/${encodeURIComponent(workItemKey)}`;
         const requestBody = JSON.stringify(payload);
-        // TEMPORARY DEBUG: log the raw request body to stderr (no headers, no tokens).
-        // Remove once the budget write is confirmed working.
-        console.error(`[debug update_karbon_workitem_fee_budget] PUT ${url} body=${requestBody}`);
         const res = await fetch(url, {
             method: "PUT",
             headers: {
@@ -366,17 +382,17 @@ function createServer() {
         const respText = await res.text();
         if (!res.ok) {
             return { content: [{ type: "text", text: JSON.stringify({
-                ok: false,
-                stage: "PUT",
-                status: res.status,
-                error: respText,
-                before: { FeeSettings: beforeFeeSettings, EstimatedBudgetMinutes: beforeBudget },
-            }, null, 2) }] };
+                            ok: false,
+                            stage: "PUT",
+                            status: res.status,
+                            error: respText,
+                            before: { FeeSettings: beforeFeeSettings, EstimatedBudgetMinutes: beforeBudget },
+                        }, null, 2) }] };
         }
-        // Verify by re-fetching — Karbon's PUT often returns 204, so we cannot
-        // trust the PUT response body. Only persisted values are reported.
+        // 5. Verify by re-fetching — Karbon's PUT often returns 204, so we cannot
+        //    trust the PUT response body. Only persisted values are reported.
         const verified = await kFetch(`/workitems/${workItemKey}`);
-        const afterFeeSettings = verified.FeeSettings ?? null;
+        const afterFeeSettings = (verified.FeeSettings ?? null);
         const afterBudget = readBudget(verified);
         const failures = [];
         if (estimatedBudgetMinutes !== undefined && afterBudget !== estimatedBudgetMinutes) {
@@ -390,27 +406,136 @@ function createServer() {
         }
         if (failures.length > 0) {
             return { content: [{ type: "text", text: JSON.stringify({
-                ok: false,
-                stage: "verification",
-                putStatus: res.status,
-                message: "Karbon accepted the PUT but the requested values did not persist on re-fetch.",
-                failures,
-                reason,
-                workItemKey,
-                before: { FeeSettings: beforeFeeSettings, EstimatedBudgetMinutes: beforeBudget },
-                after:  { FeeSettings: afterFeeSettings,  EstimatedBudgetMinutes: afterBudget },
-            }, null, 2) }] };
+                            ok: false,
+                            stage: "verification",
+                            putStatus: res.status,
+                            message: "Karbon accepted the PUT but the requested values did not persist on re-fetch.",
+                            failures,
+                            reason,
+                            workItemKey,
+                            before: { FeeSettings: beforeFeeSettings, EstimatedBudgetMinutes: beforeBudget },
+                            after: { FeeSettings: afterFeeSettings, EstimatedBudgetMinutes: afterBudget },
+                        }, null, 2) }] };
         }
         return { content: [{ type: "text", text: JSON.stringify({
-            ok: true,
-            verified: true,
-            putStatus: res.status,
-            reason,
-            workItemKey,
-            before: { FeeSettings: beforeFeeSettings, EstimatedBudgetMinutes: beforeBudget },
-            after:  { FeeSettings: afterFeeSettings,  EstimatedBudgetMinutes: afterBudget },
-        }, null, 2) }] };
+                        ok: true,
+                        verified: true,
+                        putStatus: res.status,
+                        reason,
+                        workItemKey,
+                        before: { FeeSettings: beforeFeeSettings, EstimatedBudgetMinutes: beforeBudget },
+                        after: { FeeSettings: afterFeeSettings, EstimatedBudgetMinutes: afterBudget },
+                    }, null, 2) }] };
     });
+    // ══════════════════════════════════════════════════════════════════════════
+    // COMPLETENESS-GAP TOOLS  (close gaps vs. Karbon v3 API surface)
+    // ══════════════════════════════════════════════════════════════════════════
+    // ── CONTACT / ORG / CLIENT GROUP: identifier lookups & updates ────────────
+    s.tool("get_contact_by_identifier", "Look up a contact by your own UserDefinedIdentifier (external key)", {
+        identifier: z.string().describe("Your UserDefinedIdentifier for the contact"),
+        expandBusinessCards: z.boolean().optional().default(false).describe("Include BusinessCards (emails, phones, addresses)"),
+    }, async ({ identifier, expandBusinessCards }) => {
+        const q = expandBusinessCards ? "?$expand=BusinessCards" : "";
+        return { content: [{ type: "text", text: JSON.stringify(await kFetch(`/Contacts/GetContactByUserDefinedIdentifier(UserDefinedIdentifier='${encodeURIComponent(identifier)}')${q}`), null, 2) }] };
+    });
+    s.tool("update_organization", "Update fields on an existing organization", {
+        organizationKey: z.string(),
+        fullName: z.string().optional(),
+        clientOwner: z.string().optional(),
+        clientManager: z.string().optional(),
+    }, async ({ organizationKey, ...f }) => {
+        const body = {};
+        if (f.fullName !== undefined)
+            body.FullName = f.fullName;
+        if (f.clientOwner !== undefined)
+            body.ClientOwner = f.clientOwner;
+        if (f.clientManager !== undefined)
+            body.ClientManager = f.clientManager;
+        if (Object.keys(body).length === 0)
+            return { content: [{ type: "text", text: JSON.stringify({ error: "No fields provided to update." }, null, 2) }] };
+        return { content: [{ type: "text", text: JSON.stringify(await kFetch(`/organizations/${organizationKey}`, { method: "PATCH", body: JSON.stringify(body) }), null, 2) }] };
+    });
+    s.tool("get_organization_by_identifier", "Look up an organization by your own UserDefinedIdentifier", {
+        identifier: z.string(),
+        expandBusinessCards: z.boolean().optional().default(false),
+    }, async ({ identifier, expandBusinessCards }) => {
+        const q = expandBusinessCards ? "?$expand=BusinessCards" : "";
+        return { content: [{ type: "text", text: JSON.stringify(await kFetch(`/Organizations/GetOrganizationByUserDefinedIdentifier(UserDefinedIdentifier='${encodeURIComponent(identifier)}')${q}`), null, 2) }] };
+    });
+    s.tool("create_client_group", "Create a new client group", {
+        fullName: z.string(),
+        clientOwner: z.string().optional(),
+        clientManager: z.string().optional(),
+    }, async (b) => ({ content: [{ type: "text", text: JSON.stringify(await kFetch("/clientgroups", { method: "POST", body: JSON.stringify({ FullName: b.fullName, ClientOwner: b.clientOwner, ClientManager: b.clientManager }) }), null, 2) }] }));
+    s.tool("update_client_group", "Update fields on an existing client group", {
+        clientGroupKey: z.string(),
+        fullName: z.string().optional(),
+        clientOwner: z.string().optional(),
+        clientManager: z.string().optional(),
+    }, async ({ clientGroupKey, ...f }) => {
+        const body = {};
+        if (f.fullName !== undefined)
+            body.FullName = f.fullName;
+        if (f.clientOwner !== undefined)
+            body.ClientOwner = f.clientOwner;
+        if (f.clientManager !== undefined)
+            body.ClientManager = f.clientManager;
+        if (Object.keys(body).length === 0)
+            return { content: [{ type: "text", text: JSON.stringify({ error: "No fields provided to update." }, null, 2) }] };
+        return { content: [{ type: "text", text: JSON.stringify(await kFetch(`/clientgroups/${clientGroupKey}`, { method: "PATCH", body: JSON.stringify(body) }), null, 2) }] };
+    });
+    s.tool("get_client_group_by_identifier", "Look up a client group by your own UserDefinedIdentifier", {
+        identifier: z.string(),
+    }, async ({ identifier }) => ({ content: [{ type: "text", text: JSON.stringify(await kFetch(`/ClientGroups/GetClientGroupByUserDefinedIdentifier(UserDefinedIdentifier='${encodeURIComponent(identifier)}')`), null, 2) }] }));
+    // ── GENERAL WORK ITEM UPDATE ──────────────────────────────────────────────
+    // Karbon's WorkItem PATCH accepts ONLY: Title, Description, StartDate,
+    // DueDate, DeadlineDate, AssigneeEmailAddress, WorkType. Any other field 400s.
+    // PrimaryStatus is NOT patchable here — use update_work_status for status.
+    s.tool("update_work", "Update editable fields on a work item (Title, Description, StartDate, DueDate, DeadlineDate, AssigneeEmailAddress, WorkType). Does not change status.", {
+        workKey: z.string(),
+        title: z.string().optional(),
+        description: z.string().optional(),
+        startDate: z.string().optional().describe("ISO 8601 e.g. 2026-07-01T00:00:00Z"),
+        dueDate: z.string().optional(),
+        deadlineDate: z.string().optional(),
+        assigneeEmail: z.string().optional(),
+        workType: z.string().optional(),
+    }, async ({ workKey, ...f }) => {
+        const body = {};
+        if (f.title !== undefined)
+            body.Title = f.title;
+        if (f.description !== undefined)
+            body.Description = f.description;
+        if (f.startDate !== undefined)
+            body.StartDate = f.startDate;
+        if (f.dueDate !== undefined)
+            body.DueDate = f.dueDate;
+        if (f.deadlineDate !== undefined)
+            body.DeadlineDate = f.deadlineDate;
+        if (f.assigneeEmail !== undefined)
+            body.AssigneeEmailAddress = f.assigneeEmail;
+        if (f.workType !== undefined)
+            body.WorkType = f.workType;
+        if (Object.keys(body).length === 0)
+            return { content: [{ type: "text", text: JSON.stringify({ error: "No fields provided to update." }, null, 2) }] };
+        return { content: [{ type: "text", text: JSON.stringify(await kFetch(`/workitems/${workKey}`, { method: "PATCH", body: JSON.stringify(body) }), null, 2) }] };
+    });
+    // ── WORK TEMPLATES / COMMENTS / INDIVIDUAL TIME ENTRIES ───────────────────
+    s.tool("get_work_template", "Get a single work template by key", { workTemplateKey: z.string() }, async ({ workTemplateKey }) => ({ content: [{ type: "text", text: JSON.stringify(await kFetch(`/worktemplates/${workTemplateKey}`), null, 2) }] }));
+    s.tool("get_comment", "Get a single comment by key", { commentKey: z.string() }, async ({ commentKey }) => ({ content: [{ type: "text", text: JSON.stringify(await kFetch(`/Comments('${encodeURIComponent(commentKey)}')`), null, 2) }] }));
+    s.tool("list_time_entries", "List individual (non-aggregated) time entries. Filter by user, work item, client, date, role or task type.", {
+        filter: z.string().optional().describe("OData filter e.g. \"WorkItemKey eq 'abc'\" or \"Date ge 2026-07-01\""),
+        orderBy: z.string().optional().describe("e.g. 'Date desc'"),
+        top: z.number().optional().default(20), skip: z.number().optional().default(0),
+    }, async ({ filter, orderBy, top, skip }) => {
+        const params = { $top: top, $skip: skip };
+        if (filter)
+            params.$filter = filter;
+        if (orderBy)
+            params.$orderby = orderBy;
+        return { content: [{ type: "text", text: JSON.stringify(await kFetch(`/IndividualTimeEntries${qs(params)}`), null, 2) }] };
+    });
+    s.tool("get_time_entry", "Get a single individual time entry by key", { timeEntryKey: z.string() }, async ({ timeEntryKey }) => ({ content: [{ type: "text", text: JSON.stringify(await kFetch(`/IndividualTimeEntries/${timeEntryKey}`), null, 2) }] }));
     return s;
 }
 // ── HTTP server with session management ──────────────────────────────────────
@@ -424,39 +549,6 @@ const httpServer = http.createServer(async (req, res) => {
         res.end();
         return;
     }
-    // ── TEMPORARY: Karbon Work Item debug endpoint ──────────────────────
-    // Fetches a single Karbon Work Item so the raw JSON can be inspected.
-    // REMOVE once inspection is complete. Does not log sensitive data.
-    {
-        const m = req.url ? req.url.match(/^\/test-karbon-workitem\/([^/?#]+)/) : null;
-        if (m) {
-            if (req.method !== "GET") {
-                res.writeHead(405, { "Allow": "GET" });
-                res.end("Method Not Allowed");
-                return;
-            }
-            try {
-                const workItemKey = decodeURIComponent(m[1]);
-                const upstream = await fetch(`https://api.karbonhq.com/v3/WorkItems/${encodeURIComponent(workItemKey)}`, {
-                    method: "GET",
-                    headers: {
-                        AccessKey: process.env.KARBON_ACCESS_KEY ?? "",
-                        Authorization: `Bearer ${process.env.KARBON_GB_KEY ?? ""}`,
-                        Accept: "application/json",
-                    },
-                });
-                const body = await upstream.text();
-                const ct = upstream.headers.get("content-type") ?? "application/json";
-                res.writeHead(upstream.status, { "Content-Type": ct });
-                res.end(body);
-            } catch (err) {
-                res.writeHead(500, { "Content-Type": "application/json" });
-                res.end(JSON.stringify({ error: "Failed to fetch Karbon Work Item", message: err.message }));
-            }
-            return;
-        }
-    }
-    // ── END TEMPORARY ───────────────────────────────────────────────────
     if (req.url === "/health") {
         res.writeHead(200);
         res.end("OK");
