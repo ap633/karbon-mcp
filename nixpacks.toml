@@ -1,2 +1,2 @@
 [phases.build]
-cmds = ["npm ci", "npx tsc"]
+cmds = ["npm ci --include=dev", "npx tsc"]
