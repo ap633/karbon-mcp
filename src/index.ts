@@ -1,4 +1,5 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import { parseMcpPath, checkMcpAuth, refuse, authMode } from "./mcp-auth.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { isInitializeRequest } from "@modelcontextprotocol/sdk/types.js";
 import { z } from "zod";
@@ -613,7 +614,10 @@ const httpServer = http.createServer(async (req, res) => {
 
   if (req.url === "/health") { res.writeHead(200); res.end("OK"); return; }
 
-  if (req.url === "/mcp" || req.url?.startsWith("/mcp?")) {
+  const mcpRoute = parseMcpPath(req.url);
+  if (mcpRoute.isMcp) {
+    const auth = checkMcpAuth(req, mcpRoute.pathToken);
+    if (!auth.ok) { refuse(res, auth); return; }
     const sessionId = req.headers["mcp-session-id"] as string | undefined;
 
     if (req.method === "POST") {
@@ -649,4 +653,7 @@ const httpServer = http.createServer(async (req, res) => {
   res.writeHead(404); res.end("Not found");
 });
 
-httpServer.listen(PORT, () => console.log(`Karbon MCP server running on port ${PORT}`));
+httpServer.listen(PORT, () => {
+  console.log(`Karbon MCP server running on port ${PORT}`);
+  console.log(`MCP auth: ${authMode()}`);
+});
