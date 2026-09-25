@@ -223,12 +223,79 @@ function createServer() {
     return { content: [{ type: "text", text: JSON.stringify({ contacts, organizations: orgs, work }, null, 2) }] };
   });
 
-  // ── ESTIMATE SUMMARY: PREVIEW-ONLY ──────────────────────────────────────
-  // Karbon's documented v3 API does not expose a write endpoint for
-  // EstimateSummaries — they can only be edited in the Karbon UI.
-  // This tool fetches the current rows, matches by Role/TaskType, and shows
-  // before/after EstimateMinutes so you can see exactly what to change manually.
-  s.tool("preview_karbon_estimate_summary_update", "Preview proposed EstimateMinutes changes on a Karbon Work Item's Estimate Summary, matching by RoleKey/TaskTypeKey (preferred) or RoleName/TaskTypeName. NO WRITES — Karbon's documented API does not allow updating EstimateSummary rows; this is a read-only diff to support manual edits in the Karbon UI.", {
+  // ── ESTIMATE SUMMARY: WRITE ─────────────────────────────────────────────
+  // Karbon documents PATCH /WorkItems/{key}/EstimateSummaries/{summaryKey}
+  // (EstimateMinutes, EstimateAmount, HourlyRate; see the Budgets and Time
+  // guide). It updates rows that already exist — there is no create — and rows
+  // whose key starts "0-" are time logged without an estimate, which are
+  // read-only. By default this targets the overall budget row: no user, no role.
+  s.tool("update_karbon_estimate_minutes", "Set the budgeted minutes on an existing Karbon Work Item budget (Estimate Summary) row, then re-read to verify. Targets the overall budget row (no user and no role, e.g. task type 'None') unless estimateSummaryKey is given. Cannot create rows: add a budget line in Karbon first. Refuses rows whose key starts '0-' (logged time, read-only). Requires a `reason` for auditability.", {
+    workItemKey: z.string(),
+    estimateMinutes: z.number().int().min(0).describe("Budgeted minutes to set, e.g. 919 for 15h19m"),
+    estimateSummaryKey: z.string().optional().describe("A specific row to update. Omit to use the overall (no user, no role) budget row."),
+    reason: z.string().min(1).describe("Reason for the change — required for auditability"),
+  }, async ({ workItemKey, estimateMinutes, estimateSummaryKey, reason }) => {
+    const out = (o: unknown) => ({ content: [{ type: "text" as const, text: JSON.stringify(o, null, 2) }] });
+    type Row = { EstimateSummaryKey: string; UserKey: string | null; RoleKey: string | null; TaskTypeName: string | null; EstimateMinutes: number | null; ActualMinutes: number | null };
+    const readRows = async (): Promise<Row[]> => {
+      const r = await kFetch(`/estimatesummaries/${encodeURIComponent(workItemKey)}`) as { value?: Row[] };
+      return r.value ?? [];
+    };
+
+    const rows = await readRows();
+    const writable = rows.filter((r) => !String(r.EstimateSummaryKey).startsWith("0-"));
+    let target: Row | undefined;
+    if (estimateSummaryKey) {
+      target = rows.find((r) => r.EstimateSummaryKey === estimateSummaryKey);
+      if (!target) return out({ ok: false, error: "No budget row with that key on this work item.", rows });
+      if (target.EstimateSummaryKey.startsWith("0-")) {
+        return out({ ok: false, error: "That row is logged time without an estimate (key starts '0-'); Karbon treats it as read-only.", rows });
+      }
+    } else {
+      const overall = writable.filter((r) => !r.UserKey && !r.RoleKey);
+      if (overall.length !== 1) {
+        return out({
+          ok: false,
+          error: overall.length === 0
+            ? "This work item has no overall budget row (no user, no role). Add a budget line in Karbon first — the API cannot create one."
+            : "More than one overall budget row; pass estimateSummaryKey to choose.",
+          rows,
+        });
+      }
+      target = overall[0];
+    }
+
+    const before = target.EstimateMinutes ?? null;
+    const url = `${BASE}/WorkItems/${encodeURIComponent(workItemKey)}/EstimateSummaries/${encodeURIComponent(target.EstimateSummaryKey)}`;
+    const res = await fetch(url, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json", Accept: "application/json", AccessKey: TOKEN, Authorization: `Bearer ${GB_KEY}` },
+      body: JSON.stringify({ EstimateMinutes: estimateMinutes }),
+    });
+    if (!res.ok) {
+      return out({ ok: false, stage: "PATCH", status: res.status, error: await res.text(), before: { EstimateMinutes: before } });
+    }
+
+    const after = (await readRows()).find((r) => r.EstimateSummaryKey === target!.EstimateSummaryKey);
+    const verified = !!after && after.EstimateMinutes === estimateMinutes;
+    return out({
+      ok: verified,
+      verified,
+      patchStatus: res.status,
+      reason,
+      workItemKey,
+      estimateSummaryKey: target.EstimateSummaryKey,
+      taskType: target.TaskTypeName,
+      before: { EstimateMinutes: before },
+      after: { EstimateMinutes: after ? after.EstimateMinutes : null },
+      ...(verified ? {} : { error: "PATCH returned success but the new value did not read back." }),
+    });
+  });
+
+  // ── ESTIMATE SUMMARY: PREVIEW ───────────────────────────────────────────
+  // Read-only diff of proposed changes across several rows, for review before
+  // writing. update_karbon_estimate_minutes performs a single-row write.
+  s.tool("preview_karbon_estimate_summary_update", "Preview proposed EstimateMinutes changes on a Karbon Work Item's Estimate Summary, matching by RoleKey/TaskTypeKey (preferred) or RoleName/TaskTypeName. NO WRITES — a read-only diff for review. To write one row, use update_karbon_estimate_minutes.", {
     workItemKey: z.string(),
     estimates: z.array(z.object({
       roleName: z.string().optional(),
@@ -298,7 +365,7 @@ function createServer() {
       ok: true,
       preview: true,
       writable: false,
-      message: "Karbon's documented v3 API does not expose a write endpoint for EstimateSummaries. No changes were made. Apply these edits manually in the Karbon UI.",
+      message: "Preview only — no changes were made. To write a single row, use update_karbon_estimate_minutes.",
       reason,
       workItemKey,
       matchedRows,
