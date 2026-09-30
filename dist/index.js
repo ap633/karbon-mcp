@@ -4,6 +4,7 @@ import { isInitializeRequest } from "@modelcontextprotocol/sdk/types.js";
 import { z } from "zod";
 import http from "http";
 import { randomUUID } from "crypto";
+import { registerGroupAuditTools } from "./groupAudit.js";
 const BASE = "https://api.karbonhq.com/v3";
 const TOKEN = process.env.KARBON_ACCESS_KEY ?? "";
 const GB_KEY = process.env.KARBON_GB_KEY ?? "";
@@ -536,6 +537,8 @@ function createServer() {
         return { content: [{ type: "text", text: JSON.stringify(await kFetch(`/IndividualTimeEntries${qs(params)}`), null, 2) }] };
     });
     s.tool("get_time_entry", "Get a single individual time entry by key", { timeEntryKey: z.string() }, async ({ timeEntryKey }) => ({ content: [{ type: "text", text: JSON.stringify(await kFetch(`/IndividualTimeEntries/${timeEntryKey}`), null, 2) }] }));
+    // ── CLIENT GROUP AUDIT (src/groupAudit.ts) ────────────────────────────────
+    registerGroupAuditTools(s);
     return s;
 }
 // ── HTTP server with session management ──────────────────────────────────────
