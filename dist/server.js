@@ -2,6 +2,7 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { registerGroupAuditTools } from "./groupAudit.js";
 import { registerCustomFieldTools } from "./customFields.js";
+import { registerBusinessCardTools } from "./businessCards.js";
 import { kget, pageAll, pageResult, qs, odataString, text, KarbonError, PRIMARY_STATUSES, toSpacedStatus, sameStatus, normalizeStatusFilter, getTenantSettings, validSecondaryStatuses, verifiedWrite, workItemPutBody, WORK_ITEM_STABLE_FIELDS, expectEqual, expectUnchanged, eqCaseless, eqDay, eqMoney, } from "./karbon.js";
 // All Karbon calls go through src/karbon.ts (auth headers, 429 / 409 handling,
 // @odata.nextLink paging, read-back verification). Endpoints are taken from
@@ -41,7 +42,10 @@ export function createServer() {
         orderBy: z.enum(["FullName", "FullName desc", "LastModifiedDateTime", "LastModifiedDateTime desc"]).optional(),
         ...listParams,
     }, async ({ filter, orderBy, maxRecords, nextLink }) => text(await listing("/Contacts", { $filter: filter, $orderby: orderBy }, maxRecords, nextLink)));
-    s.tool("get_contact", "Get a single contact by key", { contactKey: z.string() }, async ({ contactKey }) => text(await kget(`/Contacts/${enc(contactKey)}`)));
+    s.tool("get_contact", "Get a single contact by key. Optionally expand BusinessCards (emails, phones, addresses), ClientTeam, ClientAccess (Karbon for Clients) or ServiceTypes — off by default because $expand adds latency.", {
+        contactKey: z.string(),
+        expand: z.array(z.enum(["BusinessCards", "ClientTeam", "ClientAccess", "ServiceTypes"])).optional().describe("Related data to include"),
+    }, async ({ contactKey, expand }) => text(await kget(`/Contacts/${enc(contactKey)}${qs({ $expand: expand?.length ? [...new Set(expand)].join(",") : undefined })}`)));
     s.tool("create_contact", "Create a new contact, then read it back to confirm it exists. Requires a `reason`.", {
         firstName: z.string(), lastName: z.string(),
         contactType: z.string().optional().default("Client"),
@@ -100,7 +104,10 @@ export function createServer() {
         orderBy: z.enum(["FullName", "FullName desc", "LastModifiedDateTime", "LastModifiedDateTime desc"]).optional(),
         ...listParams,
     }, async ({ filter, orderBy, maxRecords, nextLink }) => text(await listing("/Organizations", { $filter: filter, $orderby: orderBy }, maxRecords, nextLink)));
-    s.tool("get_organization", "Get a single organization by key", { organizationKey: z.string() }, async ({ organizationKey }) => text(await kget(`/Organizations/${enc(organizationKey)}`)));
+    s.tool("get_organization", "Get a single organization by key. Optionally expand BusinessCards (emails, phones, addresses), ClientTeam, Contacts or ServiceTypes — off by default because $expand adds latency.", {
+        organizationKey: z.string(),
+        expand: z.array(z.enum(["BusinessCards", "ClientTeam", "Contacts", "ServiceTypes"])).optional().describe("Related data to include"),
+    }, async ({ organizationKey, expand }) => text(await kget(`/Organizations/${enc(organizationKey)}${qs({ $expand: expand?.length ? [...new Set(expand)].join(",") : undefined })}`)));
     s.tool("create_organization", "Create a new organization, then read it back to confirm it exists. Requires a `reason`.", {
         fullName: z.string(), contactType: z.string().optional().default("Client"),
         clientOwner: z.string().optional().describe("Email address (or UserKey) of an existing team member"),
@@ -465,6 +472,9 @@ export function createServer() {
         ...listParams,
     }, async ({ invoiceStatus, orderBy, maxRecords, nextLink }) => text(await listing("/Invoices", { $filter: invoiceStatus ? `InvoiceStatus eq '${invoiceStatus}'` : undefined, $orderby: orderBy }, maxRecords, nextLink)));
     s.tool("get_invoice", "Get a single invoice with line items and payments", { invoiceKey: z.string() }, async ({ invoiceKey }) => text(await kget(`/Invoices/${enc(invoiceKey)}?$expand=LineItems,Payments`)));
+    // ── PAYMENTS ──────────────────────────────────────────────────────────────
+    s.tool("list_payments", "List payments received (Karbon Payments and manual payments), read-only. Follows @odata.nextLink up to maxRecords.", listParams, async ({ maxRecords, nextLink }) => text(await listing("/Payments", {}, maxRecords, nextLink)));
+    s.tool("get_payment", "Get a single payment by PaymentKey, including Karbon Payments fees and net amount where applicable", { paymentKey: z.string() }, async ({ paymentKey }) => text(await kget(`/Payments/${enc(paymentKey)}`)));
     // ── ESTIMATE SUMMARIES ────────────────────────────────────────────────────
     s.tool("get_estimate_summary", "Get budget vs actual time estimates (Estimate Summaries) for a work item", { workItemKey: z.string() }, async ({ workItemKey }) => text(await kget(`/EstimateSummaries/${enc(workItemKey)}`)));
     // PATCH /WorkItems/{key}/EstimateSummaries/{summaryKey} accepts EstimateMinutes,
@@ -684,6 +694,8 @@ export function createServer() {
     });
     // ── CUSTOM FIELDS (src/customFields.ts) ───────────────────────────────────
     registerCustomFieldTools(s);
+    // ── BUSINESS CARDS (src/businessCards.ts) ─────────────────────────────────
+    registerBusinessCardTools(s);
     // ── CLIENT GROUP AUDIT (src/groupAudit.ts) ────────────────────────────────
     registerGroupAuditTools(s);
     return s;

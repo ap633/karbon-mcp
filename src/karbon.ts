@@ -128,7 +128,8 @@ export async function pageAll(path: string, params: Record<string, string | numb
   while (url) {
     const body = (await kget(url) ?? {}) as Rec;
     if (count === null && typeof body["@odata.count"] === "number") count = body["@odata.count"] as number;
-    value.push(...((body.value as Rec[] | undefined) ?? []));
+    // GET /v3/Payments documents its array as "values" (its example uses "value").
+    value.push(...((body.value ?? body.values) as Rec[] | undefined ?? []));
     url = typeof body["@odata.nextLink"] === "string" ? body["@odata.nextLink"] as string : null;
     if (value.length >= maxRecords) break;
   }

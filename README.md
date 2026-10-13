@@ -18,6 +18,7 @@ Only endpoints listed in the spec are used. Never derive endpoints from `/v3/$me
 | `src/karbon.ts` | Shared Karbon client: auth, 429/409 handling, paging, PrimaryStatus helpers, TenantSettings cache, verified writes |
 | `src/groupAudit.ts` | Client-group audit tools |
 | `src/customFields.ts` | Custom field definitions and values |
+| `src/businessCards.ts` | Business card read and verified update |
 | `test/*.test.mjs` | Mocked-Karbon tests, run against `dist/` |
 
 `dist/` is committed. Railway builds with `npx tsc` (see `nixpacks.toml`).
@@ -45,7 +46,7 @@ Only endpoints listed in the spec are used. Never derive endpoints from `/v3/$me
 | Tool | Notes |
 | --- | --- |
 | `list_contacts` | filter, orderBy, paging |
-| `get_contact` | |
+| `get_contact` | optional `expand`: BusinessCards, ClientTeam, ClientAccess, ServiceTypes (off by default because `$expand` adds latency) |
 | `get_contact_by_identifier` | by UserDefinedIdentifier; optional BusinessCards |
 | `create_contact` | write: `reason` + read-back |
 | `update_contact` | write (PATCH): FirstName, MiddleName, LastName, PreferredName, Salutation, Suffix |
@@ -54,7 +55,7 @@ Only endpoints listed in the spec are used. Never derive endpoints from `/v3/$me
 | Tool | Notes |
 | --- | --- |
 | `list_organizations` | filter, orderBy, paging |
-| `get_organization` | |
+| `get_organization` | optional `expand`: BusinessCards, ClientTeam, Contacts, ServiceTypes (off by default) |
 | `get_organization_by_identifier` | |
 | `create_organization` | write |
 | `update_organization` | write: FullName by PATCH; ClientOwner / ClientManager by a merged PUT that leaves BusinessCards untouched |
@@ -90,6 +91,12 @@ Only endpoints listed in the spec are used. Never derive endpoints from `/v3/$me
 | `update_karbon_estimate_minutes` | write (PATCH): EstimateMinutes **or** EstimateAmount (per the firm's Time and Budget setting), and/or HourlyRate. Follows `OData-EntityId` if the key is reissued. Refuses `0-` keys. |
 | `preview_karbon_estimate_summary_update` | read-only diff |
 
+### Business cards
+| Tool | Notes |
+| --- | --- |
+| `get_business_card` | by BusinessCardKey (find it with `get_contact` / `get_organization` and `expand: ["BusinessCards"]`) |
+| `update_business_card` | write: pass only what changes. Lists can be replaced whole, or edited: add/remove emails, upsert/remove phones and addresses by label. Phone labels: Work, Mobile, Office, Fax, Home, Other. Address labels: Physical, Mailing, Legal, Home. Country codes are ISO 3166-1 alpha-2 (default AU). Reads the card, merges, PUTs it with BusinessCardKey/EntityType/EntityKey, then checks the changes and that nothing else on the card moved. |
+
 ### Custom fields
 | Tool | Notes |
 | --- | --- |
@@ -112,6 +119,7 @@ Only endpoints listed in the spec are used. Never derive endpoints from `/v3/$me
 | `get_note`, `create_note` | create is a write |
 | `get_comment` | |
 | `list_invoices`, `get_invoice` | |
+| `list_payments`, `get_payment` | read-only; paged by nextLink |
 | `get_tenant_settings` | also refreshes the cache used to validate SecondaryStatus |
 | `list_users`, `get_user`, `list_team_members` | |
 | `search_karbon` | first 10 contacts, organizations and work items matching a keyword |
@@ -125,7 +133,7 @@ Only endpoints listed in the spec are used. Never derive endpoints from `/v3/$me
 npm test
 ```
 
-This compiles, then runs the mocked-Karbon tests. They cover: a write that reports success but doesn't persist, 409 and 429 retries, PrimaryStatus filters given in the no-space form, nextLink paging, SecondaryStatus validation, the estimate-key reissue, fee rules, and custom-field merge, validation and delete confirmation.
+This compiles, then runs the mocked-Karbon tests. They cover: a write that reports success but doesn't persist, 409 and 429 retries, PrimaryStatus filters given in the no-space form, nextLink paging, SecondaryStatus validation, the estimate-key reissue, fee rules, and custom-field merge, validation and delete confirmation, and business card merge/validation.
 
 ## Deploying
 

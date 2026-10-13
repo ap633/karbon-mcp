@@ -126,7 +126,8 @@ export async function pageAll(path, params = {}, opts = {}) {
         const body = (await kget(url) ?? {});
         if (count === null && typeof body["@odata.count"] === "number")
             count = body["@odata.count"];
-        value.push(...(body.value ?? []));
+        // GET /v3/Payments documents its array as "values" (its example uses "value").
+        value.push(...((body.value ?? body.values) ?? []));
         url = typeof body["@odata.nextLink"] === "string" ? body["@odata.nextLink"] : null;
         if (value.length >= maxRecords)
             break;
