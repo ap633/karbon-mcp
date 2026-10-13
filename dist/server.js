@@ -1,6 +1,7 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { registerGroupAuditTools } from "./groupAudit.js";
+import { registerCustomFieldTools } from "./customFields.js";
 import { kget, pageAll, pageResult, qs, odataString, text, KarbonError, PRIMARY_STATUSES, toSpacedStatus, sameStatus, normalizeStatusFilter, getTenantSettings, validSecondaryStatuses, verifiedWrite, workItemPutBody, WORK_ITEM_STABLE_FIELDS, expectEqual, expectUnchanged, eqCaseless, eqDay, eqMoney, } from "./karbon.js";
 // All Karbon calls go through src/karbon.ts (auth headers, 429 / 409 handling,
 // @odata.nextLink paging, read-back verification). Endpoints are taken from
@@ -681,6 +682,8 @@ export function createServer() {
         ]);
         return text({ contacts, organizations: orgs, work });
     });
+    // ── CUSTOM FIELDS (src/customFields.ts) ───────────────────────────────────
+    registerCustomFieldTools(s);
     // ── CLIENT GROUP AUDIT (src/groupAudit.ts) ────────────────────────────────
     registerGroupAuditTools(s);
     return s;
