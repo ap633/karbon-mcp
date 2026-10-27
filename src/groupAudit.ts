@@ -1,6 +1,6 @@
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
-import { kget, pageAll, verifiedWrite, workItemPutBody, toSpacedStatus, type Rec } from "./karbon.js";
+import { kget, pageAll, mapLimit, verifiedWrite, workItemPutBody, toSpacedStatus, type Rec } from "./karbon.js";
 
 // Client-group audit tooling.
 //
@@ -24,19 +24,6 @@ const kf = kget;
 const pageAllRows = async (path: string, filter?: string): Promise<Rec[]> =>
   (await pageAll(path, filter ? { $filter: filter } : {})).value;
 
-async function mapLimit<T, R>(items: T[], limit: number, fn: (item: T) => Promise<R>): Promise<R[]> {
-  const results = new Array<R>(items.length);
-  let next = 0;
-  const worker = async () => {
-    while (next < items.length) {
-      const i = next++;
-      results[i] = await fn(items[i]);
-    }
-  };
-  await Promise.all(Array.from({ length: Math.min(limit, items.length) }, worker));
-  return results;
-}
-
 // ── Field accessors (Karbon naming varies between list and detail payloads) ──
 const str = (v: unknown): string | null => (typeof v === "string" && v.trim() ? v : null);
 const workGroupKey = (w: Rec) => str(w.RelatedClientGroupKey) ?? str(w.ClientGroupKey);
@@ -57,6 +44,9 @@ type Membership = {
 };
 
 let membershipCache: Membership | null = null;
+
+// Called after a membership write so the next audit doesn't use stale members.
+export function clearMembershipCache() { membershipCache = null; }
 
 async function loadMembership(refresh = false): Promise<Membership> {
   if (!refresh && membershipCache && Date.now() - membershipCache.loadedAt < MEMBERSHIP_TTL_MS) return membershipCache;

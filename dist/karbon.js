@@ -126,7 +126,8 @@ export async function pageAll(path, params = {}, opts = {}) {
         const body = (await kget(url) ?? {});
         if (count === null && typeof body["@odata.count"] === "number")
             count = body["@odata.count"];
-        value.push(...(body.value ?? []));
+        // GET /v3/Payments documents its array as "values" (its example uses "value").
+        value.push(...((body.value ?? body.values) ?? []));
         url = typeof body["@odata.nextLink"] === "string" ? body["@odata.nextLink"] : null;
         if (value.length >= maxRecords)
             break;
@@ -141,6 +142,19 @@ export function pageResult(p) {
         value: p.value,
         ...(p.nextLink ? { "@odata.nextLink": p.nextLink, more: "More records exist: call again with nextLink set to @odata.nextLink." } : {}),
     };
+}
+// Run fn over items with at most `limit` in flight, keeping input order.
+export async function mapLimit(items, limit, fn) {
+    const results = new Array(items.length);
+    let next = 0;
+    const worker = async () => {
+        while (next < items.length) {
+            const i = next++;
+            results[i] = await fn(items[i]);
+        }
+    };
+    await Promise.all(Array.from({ length: Math.min(limit, items.length) }, worker));
+    return results;
 }
 // ── PrimaryStatus ────────────────────────────────────────────────────────────
 export const PRIMARY_STATUSES = ["Planned", "Ready To Start", "In Progress", "Waiting", "Completed"];

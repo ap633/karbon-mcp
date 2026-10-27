@@ -128,7 +128,8 @@ export async function pageAll(path: string, params: Record<string, string | numb
   while (url) {
     const body = (await kget(url) ?? {}) as Rec;
     if (count === null && typeof body["@odata.count"] === "number") count = body["@odata.count"] as number;
-    value.push(...((body.value as Rec[] | undefined) ?? []));
+    // GET /v3/Payments documents its array as "values" (its example uses "value").
+    value.push(...((body.value ?? body.values) as Rec[] | undefined ?? []));
     url = typeof body["@odata.nextLink"] === "string" ? body["@odata.nextLink"] as string : null;
     if (value.length >= maxRecords) break;
   }
@@ -143,6 +144,20 @@ export function pageResult(p: Page): Rec {
     value: p.value,
     ...(p.nextLink ? { "@odata.nextLink": p.nextLink, more: "More records exist: call again with nextLink set to @odata.nextLink." } : {}),
   };
+}
+
+// Run fn over items with at most `limit` in flight, keeping input order.
+export async function mapLimit<T, R>(items: T[], limit: number, fn: (item: T) => Promise<R>): Promise<R[]> {
+  const results = new Array<R>(items.length);
+  let next = 0;
+  const worker = async () => {
+    while (next < items.length) {
+      const i = next++;
+      results[i] = await fn(items[i]);
+    }
+  };
+  await Promise.all(Array.from({ length: Math.min(limit, items.length) }, worker));
+  return results;
 }
 
 // ── PrimaryStatus ────────────────────────────────────────────────────────────

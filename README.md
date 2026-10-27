@@ -18,6 +18,8 @@ Only endpoints listed in the spec are used. Never derive endpoints from `/v3/$me
 | `src/karbon.ts` | Shared Karbon client: auth, 429/409 handling, paging, PrimaryStatus helpers, TenantSettings cache, verified writes |
 | `src/groupAudit.ts` | Client-group audit tools |
 | `src/customFields.ts` | Custom field definitions and values |
+| `src/businessCards.ts` | Business card read and verified update |
+| `src/clientRecords.ts` | Description and contact type writes, client group members, `list_all_clients` |
 | `test/*.test.mjs` | Mocked-Karbon tests, run against `dist/` |
 
 `dist/` is committed. Railway builds with `npx tsc` (see `nixpacks.toml`).
@@ -44,20 +46,27 @@ Only endpoints listed in the spec are used. Never derive endpoints from `/v3/$me
 ### Contacts
 | Tool | Notes |
 | --- | --- |
-| `list_contacts` | filter, orderBy, paging |
-| `get_contact` | |
+| `list_contacts` | filter, orderBy, paging; `includeDescription` adds each Description (one GET per row) |
+| `get_contact` | optional `expand`: BusinessCards, ClientTeam, ClientAccess, ServiceTypes (off by default because `$expand` adds latency) |
 | `get_contact_by_identifier` | by UserDefinedIdentifier; optional BusinessCards |
 | `create_contact` | write: `reason` + read-back |
-| `update_contact` | write (PATCH): FirstName, MiddleName, LastName, PreferredName, Salutation, Suffix |
+| `update_contact` | write: name fields by PATCH (FirstName, MiddleName, LastName, PreferredName, Salutation, Suffix); emails and phones on the contact's primary Business Card (same options as `update_business_card`). The card is found before anything is written. |
 
 ### Organizations
 | Tool | Notes |
 | --- | --- |
-| `list_organizations` | filter, orderBy, paging |
-| `get_organization` | |
+| `list_organizations` | filter, orderBy, paging; `includeDescription` as for contacts |
+| `get_organization` | optional `expand`: BusinessCards, ClientTeam, Contacts, ServiceTypes (off by default) |
 | `get_organization_by_identifier` | |
 | `create_organization` | write |
 | `update_organization` | write: FullName by PATCH; ClientOwner / ClientManager by a merged PUT that leaves BusinessCards untouched |
+
+### Contacts and organizations: description, type, full list
+| Tool | Notes |
+| --- | --- |
+| `update_description` | write: Description (`EntityDescription.Text`) on a Contact or Organization. Mode `prepend` (default) puts the new line at the top and keeps the rest; `append`; `replace`. Skips the write if the text, or every link in it, is already there, so re-running is safe. `dryRun` shows before/after. Whole-record PUT without BusinessCards, then checks the new text and that no other field moved. Status: already_present, would_update, verified, not_persisted, error. |
+| `set_contact_type` | write: ContactType (Client, Inactive, Let go, …) on a Contact or Organization, checked against TenantSettings. Whole-record PUT as above. |
+| `list_all_clients` | every Contact and/or Organization in one call as `columns` + `rows` (kind, key, name, contactType, email). `contactType` filters in Karbon. `includeDescription`, `descriptionContains` or `descriptionNotContains` add the description (one GET per record, so slow across everything). |
 
 ### Client groups
 | Tool | Notes |
@@ -67,6 +76,8 @@ Only endpoints listed in the spec are used. Never derive endpoints from `/v3/$me
 | `get_client_group_by_identifier` | |
 | `create_client_group` | write |
 | `update_client_group` | write: FullName only (the only field Karbon's PATCH accepts) |
+| `list_client_group_members` | members with key, type (Contact/Organization) and, by default, name and contact type |
+| `add_client_group_member`, `remove_client_group_member` | write: whole-group PUT with the edited Members list; the group's other fields and BusinessCard are sent back as read and checked afterwards. `dryRun` available. Status: already_member / not_member, would_update, verified, not_persisted, error. |
 | `audit_work_client_groups` | read-only audit of work items with missing or wrong client groups |
 | `set_work_client_group` | write (guarded, dry run by default) |
 
@@ -90,6 +101,12 @@ Only endpoints listed in the spec are used. Never derive endpoints from `/v3/$me
 | `update_karbon_estimate_minutes` | write (PATCH): EstimateMinutes **or** EstimateAmount (per the firm's Time and Budget setting), and/or HourlyRate. Follows `OData-EntityId` if the key is reissued. Refuses `0-` keys. |
 | `preview_karbon_estimate_summary_update` | read-only diff |
 
+### Business cards
+| Tool | Notes |
+| --- | --- |
+| `get_business_card` | by BusinessCardKey (find it with `get_contact` / `get_organization` and `expand: ["BusinessCards"]`) |
+| `update_business_card` | write: pass only what changes. Lists can be replaced whole, or edited: add/remove emails, upsert/remove phones and addresses by label. Phone labels: Work, Mobile, Office, Fax, Home, Other. Address labels: Physical, Mailing, Legal, Home. Country codes are ISO 3166-1 alpha-2 (default AU). Reads the card, merges, PUTs it with BusinessCardKey/EntityType/EntityKey, then checks the changes and that nothing else on the card moved. |
+
 ### Custom fields
 | Tool | Notes |
 | --- | --- |
@@ -112,6 +129,7 @@ Only endpoints listed in the spec are used. Never derive endpoints from `/v3/$me
 | `get_note`, `create_note` | create is a write |
 | `get_comment` | |
 | `list_invoices`, `get_invoice` | |
+| `list_payments`, `get_payment` | read-only; paged by nextLink |
 | `get_tenant_settings` | also refreshes the cache used to validate SecondaryStatus |
 | `list_users`, `get_user`, `list_team_members` | |
 | `search_karbon` | first 10 contacts, organizations and work items matching a keyword |
@@ -119,13 +137,26 @@ Only endpoints listed in the spec are used. Never derive endpoints from `/v3/$me
 ### Removed
 - `list_work_tasks`, `update_task`: API v3 has no work-item task endpoint, so both returned 404.
 
+## Karbon API limits (don't build around these)
+
+These come from Karbon's spec and from live use. There is no workaround in the API, so don't try to add one.
+
+- **Filters.** Contacts and Organizations accept only `eq`, `contains` and `and` in `$filter`. `or` and `startswith` are rejected. Client groups accept `FullName eq` only. Work items reject `ne` and filtering on `RelatedClientGroupKey`.
+- **Descriptions aren't in list results.** `GET /Contacts` and `GET /Organizations` don't return `EntityDescription`, so showing descriptions costs one GET per record.
+- **Description, contact type and group members need a whole-record PUT.** PATCH accepts name fields only (Contacts) or `FullName` only (Organizations, Client groups).
+- **Notes.** Only `GET /Notes/{id}` and `POST /Notes`. There is no way to list, search or bulk-read notes.
+- **Work-item tasks.** No endpoint. Any task tool will 404.
+- **Merging duplicates.** No merge endpoint. Merge on the Karbon screen.
+- **Email and phone** live on Business Cards, not on the Contact or Organization record.
+- **Group membership** is only on `GET /ClientGroups/{key}`, not in the group list.
+
 ## Tests
 
 ```bash
 npm test
 ```
 
-This compiles, then runs the mocked-Karbon tests. They cover: a write that reports success but doesn't persist, 409 and 429 retries, PrimaryStatus filters given in the no-space form, nextLink paging, SecondaryStatus validation, the estimate-key reissue, fee rules, and custom-field merge, validation and delete confirmation.
+This compiles, then runs the mocked-Karbon tests. They cover: a write that reports success but doesn't persist, 409 and 429 retries, PrimaryStatus filters given in the no-space form, nextLink paging, SecondaryStatus validation, the estimate-key reissue, fee rules, and custom-field merge, validation and delete confirmation, business card merge/validation, and the description, contact type, group member, contact email/phone and list-everything tools.
 
 ## Deploying
 

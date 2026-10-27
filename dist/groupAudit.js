@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { kget, pageAll, verifiedWrite, workItemPutBody, toSpacedStatus } from "./karbon.js";
+import { kget, pageAll, mapLimit, verifiedWrite, workItemPutBody, toSpacedStatus } from "./karbon.js";
 // Client-group audit tooling.
 //
 // A work item's client group (RelatedClientGroupKey / ClientGroupKey) is set once
@@ -17,18 +17,6 @@ const MEMBERSHIP_TTL_MS = 10 * 60 * 1000;
 const OPEN_STATUSES = ["Planned", "Ready To Start", "In Progress", "Waiting"];
 const kf = kget;
 const pageAllRows = async (path, filter) => (await pageAll(path, filter ? { $filter: filter } : {})).value;
-async function mapLimit(items, limit, fn) {
-    const results = new Array(items.length);
-    let next = 0;
-    const worker = async () => {
-        while (next < items.length) {
-            const i = next++;
-            results[i] = await fn(items[i]);
-        }
-    };
-    await Promise.all(Array.from({ length: Math.min(limit, items.length) }, worker));
-    return results;
-}
 // ── Field accessors (Karbon naming varies between list and detail payloads) ──
 const str = (v) => (typeof v === "string" && v.trim() ? v : null);
 const workGroupKey = (w) => str(w.RelatedClientGroupKey) ?? str(w.ClientGroupKey);
@@ -38,6 +26,8 @@ const templateOf = (w) => str(w.WorkTemplateTile) ?? str(w.WorkTemplateTitle) ??
 // Kept for existing imports; see toSpacedStatus in ./karbon.ts.
 export const toDisplayStatus = toSpacedStatus;
 let membershipCache = null;
+// Called after a membership write so the next audit doesn't use stale members.
+export function clearMembershipCache() { membershipCache = null; }
 async function loadMembership(refresh = false) {
     if (!refresh && membershipCache && Date.now() - membershipCache.loadedAt < MEMBERSHIP_TTL_MS)
         return membershipCache;
