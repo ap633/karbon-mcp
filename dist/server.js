@@ -38,7 +38,7 @@ const createdReadBack = (keyField, getPath) => async (res) => {
 };
 const pick = (o, fields) => Object.fromEntries(fields.map(f => [f, o[f] ?? null]));
 export function createServer() {
-    const s = new McpServer({ name: "karbon-mcp", version: "2.3.0" });
+    const s = new McpServer({ name: "karbon-mcp", version: "2.4.0" });
     // ── CONTACTS ──────────────────────────────────────────────────────────────
     s.tool("list_contacts", "List contacts (people) from Karbon. Follows @odata.nextLink up to maxRecords; returns @odata.nextLink if more exist. Filters accept eq, contains and and only (no or, no startswith).", {
         filter: z.string().optional().describe("OData filter on FullName, EmailAddress, PhoneNumber, ContactType or ExternalKey, e.g. \"ContactType eq 'Client'\" or \"contains(FullName,'Smith')\""),

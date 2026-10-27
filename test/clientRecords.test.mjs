@@ -20,7 +20,7 @@ function reset() {
   clearTenantCache();
   log = [];
   queue = [];
-  flags = { ignorePuts: false, htmlDescriptions: false, dropOnPut: null };
+  flags = { ignorePuts: false, htmlDescriptions: false, dropOnPut: null, groupDropOnPut: null };
   db = {
     Contacts: {
       C1: {
@@ -102,6 +102,8 @@ globalThis.fetch = async (url, opts = {}) => {
       if ((body.BusinessCard?.PhoneNumbers ?? []).some(p => "PhoneNumberKey" in p)) return json({ error: { code: "4001", message: "Unsupported option" } }, 400);
       if (flags.ignorePuts) return noContent();
       db.groups[m[1]] = { ...g, ...body, BusinessCard: body.BusinessCard ? { ...body.BusinessCard, PhoneNumbers: body.BusinessCard.PhoneNumbers.map((p, i) => ({ PhoneNumberKey: `N${i}`, ...p })) } : g.BusinessCard };
+      if (flags.groupDropOnPut === "Members") db.groups[m[1]].Members = [];
+      else if (flags.groupDropOnPut) delete db.groups[m[1]][flags.groupDropOnPut];
       return noContent();
     }
   }
@@ -281,4 +283,71 @@ test("list_all_clients returns compact rows and filters on description", async (
   assert.equal(missing.columns.at(-1), "description");
   await call("list_all_clients", { contactType: "Client", include: ["Contact"] });
   assert.match(log.at(-1).url.searchParams.get("$filter"), /ContactType eq 'Client'/);
+});
+
+// ── update_client_group_description ──────────────────────────────────────────
+const IGN = "https://go.ignitionapp.com/clients/12345";
+const bottomley = () => ({
+  ClientGroupKey: "2Xq8GyctZGtl", FullName: "Bottomley (Sarah) Group", ClientOwner: "andrea@dream.au", ClientManager: "sam@dream.au", ContactType: "Client",
+  UserDefinedIdentifier: "BOTTOMLEY", RestrictionLevel: "Public", PrimaryContact: "Sarah Bottomley", EntityDescription: null, LastModifiedDateTime: "2026-01-01T00:00:00Z",
+  Members: [{ ContactKey: "C1", OrganizationKey: null }, { ContactKey: null, OrganizationKey: "O1" }],
+});
+
+test("group description: prepend keeps the existing text, Members, card and every other field", async () => {
+  const r = await call("update_client_group_description", { clientGroupKey: "G1", text: IGN, reason: "test" });
+  assert.equal(r.status, "verified", JSON.stringify(r));
+  assert.equal(r.before, "family");
+  assert.equal(db.groups.G1.EntityDescription.Text, `${IGN}\nfamily`);
+  const body = puts()[0].body;
+  assert.equal(body.ClientGroupKey, "G1");
+  assert.deepEqual(body.Members, [{ ContactKey: "C1", OrganizationKey: null }]);
+  for (const f of ["FullName", "ClientOwner", "ClientManager", "ContactType", "RestrictionLevel", "PrimaryContact"]) assert.equal(body[f], db.groups.G1[f], f);
+  assert.equal(body.BusinessCard.BusinessCardKey, "BCG");
+  assert.ok(!("LastModifiedDateTime" in body) && !Object.keys(body).some(k => k.startsWith("@odata")));
+});
+
+test("group description: re-running with the same link writes nothing", async () => {
+  db.groups.G1.EntityDescription = { Text: `${IGN}\nfamily` };
+  const r = await call("update_client_group_description", { clientGroupKey: "G1", text: IGN, reason: "test" });
+  assert.equal(r.status, "already_present");
+  assert.equal(puts().length, 0);
+});
+
+test("group description: dry run on Bottomley (Sarah) Group shows before/after and writes nothing", async () => {
+  db.groups["2Xq8GyctZGtl"] = bottomley();
+  const r = await call("update_client_group_description", { clientGroupKey: "2Xq8GyctZGtl", text: IGN, dryRun: true, reason: "dry run" });
+  assert.equal(r.status, "would_update");
+  assert.equal(r.groupName, "Bottomley (Sarah) Group");
+  assert.equal(r.before, "");
+  assert.equal(r.after, IGN);
+  assert.equal(puts().length, 0);
+});
+
+test("group description: an empty description gets just the text; append and replace work", async () => {
+  db.groups["2Xq8GyctZGtl"] = bottomley();
+  assert.equal((await call("update_client_group_description", { clientGroupKey: "2Xq8GyctZGtl", text: IGN, reason: "t" })).status, "verified");
+  assert.equal(db.groups["2Xq8GyctZGtl"].EntityDescription.Text, IGN);
+  assert.equal((await call("update_client_group_description", { clientGroupKey: "2Xq8GyctZGtl", text: "HubSpot: 9", mode: "append", reason: "t" })).status, "verified");
+  assert.equal(db.groups["2Xq8GyctZGtl"].EntityDescription.Text, `${IGN}\nHubSpot: 9`);
+  assert.equal((await call("update_client_group_description", { clientGroupKey: "2Xq8GyctZGtl", text: "new", mode: "replace", reason: "t" })).status, "verified");
+  assert.equal(db.groups["2Xq8GyctZGtl"].EntityDescription.Text, "new");
+});
+
+test("group description: 204 without saving is not_persisted", async () => {
+  flags.ignorePuts = true;
+  const r = await call("update_client_group_description", { clientGroupKey: "G1", text: IGN, reason: "test" });
+  assert.equal(r.ok, false);
+  assert.equal(r.status, "not_persisted");
+  assert.match(r.failures.join(), /Description: expected/);
+});
+
+test("group description: members or another field lost in the PUT is reported", async () => {
+  flags.groupDropOnPut = "Members";
+  const r = await call("update_client_group_description", { clientGroupKey: "G1", text: IGN, reason: "test" });
+  assert.equal(r.ok, false);
+  assert.match(r.failures.join(), /Members changed unexpectedly/);
+  reset();
+  flags.groupDropOnPut = "ClientOwner";
+  const r2 = await call("update_client_group_description", { clientGroupKey: "G1", text: IGN, reason: "test" });
+  assert.match(r2.failures.join(), /ClientOwner changed unexpectedly/);
 });

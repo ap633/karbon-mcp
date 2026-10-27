@@ -78,6 +78,7 @@ Only endpoints listed in the spec are used. Never derive endpoints from `/v3/$me
 | `update_client_group` | write: FullName only (the only field Karbon's PATCH accepts) |
 | `list_client_group_members` | members with key, type (Contact/Organization) and, by default, name and contact type |
 | `add_client_group_member`, `remove_client_group_member` | write: whole-group PUT with the edited Members list; the group's other fields and BusinessCard are sent back as read and checked afterwards. `dryRun` available. Status: already_member / not_member, would_update, verified, not_persisted, error. |
+| `update_client_group_description` | write: Description on a client group, same modes, duplicate check and `dryRun` as `update_description`. Whole-group PUT built exactly as the member tools build it, with only `EntityDescription.Text` changed; then checks the new text, the full Members list and every other group field. Try it with `node scripts/group-description-dry-run.mjs "<text>" [groupKey]` (always a dry run). |
 | `audit_work_client_groups` | read-only audit of work items with missing or wrong client groups |
 | `set_work_client_group` | write (guarded, dry run by default) |
 

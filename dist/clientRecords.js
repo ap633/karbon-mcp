@@ -119,8 +119,9 @@ function groupPutBody(cur, key, members) {
         body.BusinessCard = cardPutBody(card, s0(card.BusinessCardKey));
     return body;
 }
-function groupUnchanged(f, before, after) {
-    expectUnchanged(f, before, after, GROUP_PUT_FIELDS);
+// `changed` lists group fields the write meant to change (e.g. EntityDescription).
+function groupUnchanged(f, before, after, changed = []) {
+    expectUnchanged(f, before, after, GROUP_PUT_FIELDS.filter(x => !changed.includes(x)));
     const b = (before.BusinessCard ?? null), a = (after.BusinessCard ?? null);
     if (b)
         for (const [field, norm] of Object.entries(CARD_FIELDS)) {
@@ -288,6 +289,54 @@ export function registerClientRecordTools(s) {
             ? { members: ms.filter(m => memberKey(m) !== a.memberKey) }
             : { members: ms, noop: "not_member" },
     })));
+    s.tool("update_client_group_description", "Write the Description on a Client Group. Default mode 'prepend' puts the new text at the top and keeps everything already there; 'append' adds it at the end; 'replace' overwrites. Skips the write if the text is already there (for text with links: every link is already in the description), so re-running is safe. Karbon only accepts this through a whole-group PUT, so the group is read and sent back with the same fields, Members and BusinessCard as the member tools send, with only the description changed, then read back to confirm the new description, the full member list and that no other group field moved. Status: already_present | would_update | verified | not_persisted | error. Requires a `reason`.", {
+        clientGroupKey: z.string(),
+        text: z.string().trim().min(1).describe("The line to add, e.g. an Ignition link"),
+        mode: z.enum(["prepend", "append", "replace"]).optional().default("prepend"),
+        separator: z.string().optional().default("\n").describe("Placed between the new text and the existing description. Default: a line break."),
+        skipIfPresent: z.boolean().optional().default(true).describe("Don't write if the text (or every link in it) is already in the description"),
+        dryRun: z.boolean().optional().default(false).describe("Show the before/after text without writing"),
+        reason: reasonParam,
+    }, async (a) => {
+        const path = `/ClientGroups/${enc(a.clientGroupKey)}`;
+        const cur = (await kget(path) ?? {});
+        const before = descriptionOf(cur);
+        const base = { clientGroupKey: a.clientGroupKey, groupName: cur.FullName ?? null, reason: a.reason, mode: a.mode };
+        if (a.skipIfPresent && (a.mode === "replace" ? normDescription(before) === normDescription(a.text) : alreadyPresent(before, a.text))) {
+            return text({ ok: true, status: "already_present", ...base, description: before });
+        }
+        if (a.dryRun)
+            return text({ ok: true, status: "would_update", ...base, before, after: combineDescription(before, a.text, a.mode, a.separator) });
+        let sent = "";
+        let members = [];
+        const w = await verifiedWrite({
+            tool: "update_client_group_description", reason: a.reason,
+            read: async () => (await kget(path) ?? {}),
+            build: (c) => {
+                const existing = descriptionOf(c);
+                // On a 409 retry someone may have added it meanwhile; don't add it twice.
+                sent = a.skipIfPresent && a.mode !== "replace" && alreadyPresent(existing, a.text) ? existing : combineDescription(existing, a.text, a.mode, a.separator);
+                members = membersOf(c);
+                return { method: "PUT", path, body: { ...groupPutBody(c, a.clientGroupKey, members), EntityDescription: { ...(c.EntityDescription ?? {}), Text: sent } } };
+            },
+            verify: (after, before) => {
+                const f = [];
+                if (normDescription(descriptionOf(after)) !== normDescription(sent))
+                    f.push(`Description: expected ${JSON.stringify(sent)}, got ${JSON.stringify(descriptionOf(after))}`);
+                if (memberSet(membersOf(after)) !== memberSet(members))
+                    f.push(`Members changed unexpectedly: was ${memberSet(members)}, now ${memberSet(membersOf(after))}`);
+                groupUnchanged(f, before, after, ["EntityDescription"]);
+                return f;
+            },
+        });
+        return text({
+            ok: w.ok, status: writeStatus(w), httpStatus: w.status, ...base,
+            ...(w.conflictRetries ? { conflictRetries: w.conflictRetries } : {}),
+            ...(w.error ? { error: w.error } : {}),
+            ...(w.failures.length ? { failures: w.failures } : {}),
+            before: descriptionOf(w.before), after: w.after ? descriptionOf(w.after) : null,
+        });
+    });
     s.tool("list_all_clients", "Every Contact and/or Organization in one call, compact: columns + rows (kind, key, name, contactType, email, and description when asked). Pages through everything internally. contactType filters on Karbon's side. includeDescription (or either description filter) adds one GET per record, so it is slow for the whole list — narrow with contactType where you can.", {
         include: z.array(entityTypeParam).optional().default(["Contact", "Organization"]),
         contactType: z.string().optional().describe("Only this contact type, e.g. Client"),
