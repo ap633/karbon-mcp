@@ -116,6 +116,10 @@ export const odataString = (s) => `'${s.replace(/'/g, "''")}'`;
 // maxRecords rows have been read. Whole pages are kept (a partial page would make
 // the returned nextLink skip rows), so the result can exceed maxRecords by up to
 // one page. Pass `from` (a nextLink from an earlier call) to continue.
+//
+// skipFallback: for endpoints that return @odata.count but no @odata.nextLink
+// (GET /v3/WorkTemplates), step $skip forward until count is reached. The links
+// it builds are returned as nextLink too, so callers continue the same way.
 export async function pageAll(path, params = {}, opts = {}) {
     const maxRecords = opts.maxRecords ?? Infinity;
     const pageSize = Math.max(1, Math.min(opts.pageSize ?? PAGE_SIZE, PAGE_SIZE, Number.isFinite(maxRecords) ? maxRecords : PAGE_SIZE));
@@ -127,8 +131,18 @@ export async function pageAll(path, params = {}, opts = {}) {
         if (count === null && typeof body["@odata.count"] === "number")
             count = body["@odata.count"];
         // GET /v3/Payments documents its array as "values" (its example uses "value").
-        value.push(...((body.value ?? body.values) ?? []));
+        const rows = (body.value ?? body.values) ?? [];
+        value.push(...rows);
+        const current = url;
         url = typeof body["@odata.nextLink"] === "string" ? body["@odata.nextLink"] : null;
+        if (!url && opts.skipFallback && rows.length && typeof body["@odata.count"] === "number") {
+            const next = new URL(/^https?:\/\//i.test(current) ? current : `${BASE}${current}`);
+            const skip = Number(next.searchParams.get("$skip") ?? 0) + rows.length;
+            if (skip < body["@odata.count"]) {
+                next.searchParams.set("$skip", String(skip));
+                url = next.toString();
+            }
+        }
         if (value.length >= maxRecords)
             break;
     }

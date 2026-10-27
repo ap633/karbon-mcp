@@ -119,7 +119,11 @@ export type Page = { value: Rec[]; nextLink: string | null; count: number | null
 // maxRecords rows have been read. Whole pages are kept (a partial page would make
 // the returned nextLink skip rows), so the result can exceed maxRecords by up to
 // one page. Pass `from` (a nextLink from an earlier call) to continue.
-export async function pageAll(path: string, params: Record<string, string | number | boolean | undefined> = {}, opts: { maxRecords?: number; pageSize?: number; from?: string } = {}): Promise<Page> {
+//
+// skipFallback: for endpoints that return @odata.count but no @odata.nextLink
+// (GET /v3/WorkTemplates), step $skip forward until count is reached. The links
+// it builds are returned as nextLink too, so callers continue the same way.
+export async function pageAll(path: string, params: Record<string, string | number | boolean | undefined> = {}, opts: { maxRecords?: number; pageSize?: number; from?: string; skipFallback?: boolean } = {}): Promise<Page> {
   const maxRecords = opts.maxRecords ?? Infinity;
   const pageSize = Math.max(1, Math.min(opts.pageSize ?? PAGE_SIZE, PAGE_SIZE, Number.isFinite(maxRecords) ? maxRecords : PAGE_SIZE));
   let url: string | null = opts.from ?? `${path}${qs({ ...params, $top: pageSize })}`;
@@ -129,8 +133,18 @@ export async function pageAll(path: string, params: Record<string, string | numb
     const body = (await kget(url) ?? {}) as Rec;
     if (count === null && typeof body["@odata.count"] === "number") count = body["@odata.count"] as number;
     // GET /v3/Payments documents its array as "values" (its example uses "value").
-    value.push(...((body.value ?? body.values) as Rec[] | undefined ?? []));
+    const rows = (body.value ?? body.values) as Rec[] | undefined ?? [];
+    value.push(...rows);
+    const current: string = url;
     url = typeof body["@odata.nextLink"] === "string" ? body["@odata.nextLink"] as string : null;
+    if (!url && opts.skipFallback && rows.length && typeof body["@odata.count"] === "number") {
+      const next = new URL(/^https?:\/\//i.test(current) ? current : `${BASE}${current}`);
+      const skip = Number(next.searchParams.get("$skip") ?? 0) + rows.length;
+      if (skip < (body["@odata.count"] as number)) {
+        next.searchParams.set("$skip", String(skip));
+        url = next.toString();
+      }
+    }
     if (value.length >= maxRecords) break;
   }
   return { value, nextLink: url, count };
