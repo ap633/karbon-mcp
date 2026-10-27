@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { kget, pageAll, verifiedWrite, workItemPutBody, toSpacedStatus } from "./karbon.js";
 // Client-group audit tooling.
 //
 // A work item's client group (RelatedClientGroupKey / ClientGroupKey) is set once
@@ -9,64 +10,13 @@ import { z } from "zod";
 // - /workitems rejects $filter on RelatedClientGroupKey (4002), so we filter client-side.
 // - `ne` is not allowed in $filter; statuses are queried one at a time with display values.
 // - Group membership is only on GET /clientgroups/{key} (Members[]), not on the list.
-// - GET returns camelCase PrimaryStatus ("InProgress") but PUT only accepts display format.
-// - Some writes return 204 with an empty body.
+// - GET returns no-space PrimaryStatus ("InProgress"); PUT bodies are sent the spaced form.
 // - Writes can silently fail, so every write is verified by a GET read-back.
-const BASE = "https://api.karbonhq.com/v3";
-const TOKEN = process.env.KARBON_ACCESS_KEY ?? "";
-const GB_KEY = process.env.KARBON_GB_KEY ?? "";
-const PAGE_SIZE = 100;
-const MAX_ATTEMPTS = 5;
+// Auth, 429/409 handling, nextLink paging and verification come from ./karbon.ts.
 const MEMBERSHIP_TTL_MS = 10 * 60 * 1000;
 const OPEN_STATUSES = ["Planned", "Ready To Start", "In Progress", "Waiting"];
-const sleep = (ms) => new Promise(r => setTimeout(r, ms));
-// ── Fetch helper: retries 429/5xx with backoff (honours Retry-After), tolerates empty bodies ──
-async function kf(path, opts = {}) {
-    for (let attempt = 1;; attempt++) {
-        const res = await fetch(`${BASE}${path}`, {
-            ...opts,
-            headers: { "Content-Type": "application/json", Accept: "application/json", AccessKey: TOKEN, Authorization: `Bearer ${GB_KEY}`, ...(opts.headers ?? {}) },
-        });
-        const retryable = res.status === 429 || res.status >= 500;
-        if (retryable && attempt < MAX_ATTEMPTS) {
-            await sleep(retryDelayMs(res.headers.get("retry-after"), attempt));
-            continue;
-        }
-        const text = await res.text();
-        if (!res.ok)
-            throw new Error(`Karbon ${res.status}: ${text}`);
-        if (!text.trim())
-            return null;
-        try {
-            return JSON.parse(text);
-        }
-        catch {
-            return text;
-        }
-    }
-}
-function retryDelayMs(retryAfter, attempt) {
-    if (retryAfter) {
-        const secs = Number(retryAfter);
-        if (Number.isFinite(secs))
-            return Math.min(secs * 1000, 60_000);
-        const at = Date.parse(retryAfter);
-        if (!Number.isNaN(at))
-            return Math.min(Math.max(at - Date.now(), 0), 60_000);
-    }
-    return Math.min(500 * 2 ** (attempt - 1), 8_000) + Math.floor(Math.random() * 250);
-}
-async function pageAll(path, filter) {
-    const out = [];
-    for (let skip = 0;; skip += PAGE_SIZE) {
-        const f = filter ? `&$filter=${encodeURIComponent(filter)}` : "";
-        const page = await kf(`${path}?$top=${PAGE_SIZE}&$skip=${skip}${f}`);
-        const rows = page?.value ?? [];
-        out.push(...rows);
-        if (rows.length < PAGE_SIZE)
-            return out;
-    }
-}
+const kf = kget;
+const pageAllRows = async (path, filter) => (await pageAll(path, filter ? { $filter: filter } : {})).value;
 async function mapLimit(items, limit, fn) {
     const results = new Array(items.length);
     let next = 0;
@@ -85,20 +35,13 @@ const workGroupKey = (w) => str(w.RelatedClientGroupKey) ?? str(w.ClientGroupKey
 const memberKey = (m) => str(m.ContactKey) ?? str(m.OrganizationKey) ?? str(m.ClientKey);
 const groupName = (g) => str(g.FullName) ?? str(g.Name) ?? str(g.ClientGroupName) ?? "(unnamed group)";
 const templateOf = (w) => str(w.WorkTemplateTile) ?? str(w.WorkTemplateTitle) ?? str(w.WorkTemplateKey) ?? "(no template)";
-const STATUS_DISPLAY = {
-    Planned: "Planned", ReadyToStart: "Ready To Start", InProgress: "In Progress", Waiting: "Waiting", Completed: "Completed",
-};
-// GET returns "InProgress"; PUT only accepts "In Progress".
-export function toDisplayStatus(s) {
-    if (typeof s !== "string")
-        return s;
-    return STATUS_DISPLAY[s] ?? STATUS_DISPLAY[s.replace(/\s+/g, "")] ?? s;
-}
+// Kept for existing imports; see toSpacedStatus in ./karbon.ts.
+export const toDisplayStatus = toSpacedStatus;
 let membershipCache = null;
 async function loadMembership(refresh = false) {
     if (!refresh && membershipCache && Date.now() - membershipCache.loadedAt < MEMBERSHIP_TTL_MS)
         return membershipCache;
-    const groups = await pageAll("/clientgroups");
+    const groups = await pageAllRows("/clientgroups");
     const groupNames = new Map();
     const byClient = new Map();
     const errors = [];
@@ -156,7 +99,7 @@ export function registerGroupAuditTools(server) {
             .map(s => ({ label: s, filter: `PrimaryStatus eq '${s}'` }));
         if (completedSince)
             filters.push({ label: `Completed since ${completedSince}`, filter: `PrimaryStatus eq 'Completed' and CompletedDate ge ${completedSince}T00:00:00Z` });
-        const pages = await mapLimit(filters, 2, f => pageAll("/workitems", f.filter));
+        const pages = await mapLimit(filters, 2, f => pageAllRows("/workitems", f.filter));
         const seen = new Set();
         const work = [];
         const scannedByStatus = {};
@@ -275,20 +218,19 @@ export function registerGroupAuditTools(server) {
                     return { ...info, status: "refused", note: "Client is not a member of the target group." };
                 if (dryRun)
                     return { ...info, status: "would_update" };
-                const payload = {};
-                for (const [k, v] of Object.entries(current))
-                    if (!k.startsWith("@odata"))
-                        payload[k] = v;
-                payload.WorkItemKey = workKey;
-                payload.PrimaryStatus = toDisplayStatus(current.PrimaryStatus);
-                payload.RelatedClientGroupKey = clientGroupKey;
-                payload.ClientGroupKey = clientGroupKey;
-                await kf(`/workitems/${encodeURIComponent(workKey)}`, { method: "PUT", body: JSON.stringify(payload) });
-                const after = workGroupKey((await kf(`/workitems/${encodeURIComponent(workKey)}`) ?? {}));
-                console.log(JSON.stringify({ audit: "set_work_client_group", workKey, before, after, target: clientGroupKey, reason, at: new Date().toISOString() }));
-                if (after === clientGroupKey)
+                const path = `/workitems/${encodeURIComponent(workKey)}`;
+                const w = await verifiedWrite({
+                    tool: "set_work_client_group", reason,
+                    read: async () => (await kf(path) ?? {}),
+                    build: (cur) => ({ method: "PUT", path, body: { ...workItemPutBody(cur, workKey), RelatedClientGroupKey: clientGroupKey, ClientGroupKey: clientGroupKey } }),
+                    verify: (afterRec) => (workGroupKey(afterRec) === clientGroupKey ? [] : [`client group is ${workGroupKey(afterRec) ?? "empty"}`]),
+                });
+                const after = w.after ? workGroupKey(w.after) : null;
+                if (w.ok)
                     return { ...info, after, status: "verified" };
-                return { ...info, after, status: "not_persisted", note: "Karbon accepted the PUT but the group did not change. Use Change Client in the Karbon UI for this item." };
+                if (w.after)
+                    return { ...info, after, status: "not_persisted", note: "Karbon accepted the PUT but the group did not change. Use Change Client in the Karbon UI for this item." };
+                return { ...info, status: "error", error: w.error };
             }
             catch (e) {
                 return { ...base, status: "error", error: e.message };
