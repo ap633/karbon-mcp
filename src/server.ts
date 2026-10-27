@@ -55,7 +55,7 @@ const createdReadBack = (keyField: string, getPath: (key: string) => string) => 
 const pick = (o: Rec, fields: string[]) => Object.fromEntries(fields.map(f => [f, o[f] ?? null]));
 
 export function createServer() {
-  const s = new McpServer({ name: "karbon-mcp", version: "2.3.0" });
+  const s = new McpServer({ name: "karbon-mcp", version: "2.4.0" });
 
   // ── CONTACTS ──────────────────────────────────────────────────────────────
   s.tool("list_contacts", "List contacts (people) from Karbon. Follows @odata.nextLink up to maxRecords; returns @odata.nextLink if more exist. Filters accept eq, contains and and only (no or, no startswith).", {
