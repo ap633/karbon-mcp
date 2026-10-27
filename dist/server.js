@@ -2,7 +2,8 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { registerGroupAuditTools } from "./groupAudit.js";
 import { registerCustomFieldTools } from "./customFields.js";
-import { registerBusinessCardTools } from "./businessCards.js";
+import { registerBusinessCardTools, updateBusinessCard, cardUpdateShape } from "./businessCards.js";
+import { registerClientRecordTools, addDescriptions } from "./clientRecords.js";
 import { kget, pageAll, pageResult, qs, odataString, text, KarbonError, PRIMARY_STATUSES, toSpacedStatus, sameStatus, normalizeStatusFilter, getTenantSettings, validSecondaryStatuses, verifiedWrite, workItemPutBody, WORK_ITEM_STABLE_FIELDS, expectEqual, expectUnchanged, eqCaseless, eqDay, eqMoney, } from "./karbon.js";
 // All Karbon calls go through src/karbon.ts (auth headers, 429 / 409 handling,
 // @odata.nextLink paging, read-back verification). Endpoints are taken from
@@ -19,6 +20,8 @@ const listParams = {
 };
 const reasonParam = z.string().trim().min(1).describe("Why this change is being made — required for auditability");
 const listing = (path, params, maxRecords, nextLink) => pageAll(path, params, { maxRecords, from: nextLink }).then(pageResult);
+const includeDescriptionParam = z.boolean().optional().default(false)
+    .describe("Add each record's Description. Karbon's list doesn't return it, so this costs one GET per record — keep maxRecords small.");
 const writeResult = (w, extra = {}) => text({
     ok: w.ok, verified: w.verified, status: w.status, ...extra,
     ...(w.conflictRetries ? { conflictRetries: w.conflictRetries } : {}),
@@ -35,13 +38,19 @@ const createdReadBack = (keyField, getPath) => async (res) => {
 };
 const pick = (o, fields) => Object.fromEntries(fields.map(f => [f, o[f] ?? null]));
 export function createServer() {
-    const s = new McpServer({ name: "karbon-mcp", version: "2.2.0" });
+    const s = new McpServer({ name: "karbon-mcp", version: "2.3.0" });
     // ── CONTACTS ──────────────────────────────────────────────────────────────
-    s.tool("list_contacts", "List contacts (people) from Karbon. Follows @odata.nextLink up to maxRecords; returns @odata.nextLink if more exist.", {
+    s.tool("list_contacts", "List contacts (people) from Karbon. Follows @odata.nextLink up to maxRecords; returns @odata.nextLink if more exist. Filters accept eq, contains and and only (no or, no startswith).", {
         filter: z.string().optional().describe("OData filter on FullName, EmailAddress, PhoneNumber, ContactType or ExternalKey, e.g. \"ContactType eq 'Client'\" or \"contains(FullName,'Smith')\""),
         orderBy: z.enum(["FullName", "FullName desc", "LastModifiedDateTime", "LastModifiedDateTime desc"]).optional(),
+        includeDescription: includeDescriptionParam,
         ...listParams,
-    }, async ({ filter, orderBy, maxRecords, nextLink }) => text(await listing("/Contacts", { $filter: filter, $orderby: orderBy }, maxRecords, nextLink)));
+    }, async ({ filter, orderBy, includeDescription, maxRecords, nextLink }) => {
+        const p = await pageAll("/Contacts", { $filter: filter, $orderby: orderBy }, { maxRecords, from: nextLink });
+        if (includeDescription)
+            await addDescriptions(p.value, "Contact");
+        return text(pageResult(p));
+    });
     s.tool("get_contact", "Get a single contact by key. Optionally expand BusinessCards (emails, phones, addresses), ClientTeam, ClientAccess (Karbon for Clients) or ServiceTypes — off by default because $expand adds latency.", {
         contactKey: z.string(),
         expand: z.array(z.enum(["BusinessCards", "ClientTeam", "ClientAccess", "ServiceTypes"])).optional().describe("Related data to include"),
@@ -70,40 +79,78 @@ export function createServer() {
         return writeResult(w, { reason: b.reason, contactKey: w.after?.ContactKey ?? null, after: w.after });
     });
     // Karbon's Contact PATCH accepts only FirstName, MiddleName, LastName,
-    // PreferredName, Salutation, Suffix and RestrictionLevel.
-    s.tool("update_contact", "Update a contact's name fields (FirstName, MiddleName, LastName, PreferredName, Salutation, Suffix) via PATCH, then read back to confirm. Requires a `reason`.", {
+    // PreferredName, Salutation, Suffix and RestrictionLevel. Email and phone live
+    // on the contact's Business Card, so those go through updateBusinessCard on the
+    // primary card (checked to exist before anything is written).
+    s.tool("update_contact", "Update a contact's name fields (FirstName, MiddleName, LastName, PreferredName, Salutation, Suffix) via PATCH, and/or the emails and phones on the contact's primary Business Card, then read back to confirm. Phone labels: Work, Mobile, Office, Fax, Home, Other. Requires a `reason`.", {
         contactKey: z.string(),
         firstName: z.string().optional(), middleName: z.string().optional(), lastName: z.string().optional(),
         preferredName: z.string().optional(), salutation: z.string().optional(), suffix: z.string().optional(),
+        emailAddresses: cardUpdateShape.emailAddresses, addEmailAddresses: cardUpdateShape.addEmailAddresses, removeEmailAddresses: cardUpdateShape.removeEmailAddresses,
+        phoneNumbers: cardUpdateShape.phoneNumbers, upsertPhoneNumbers: cardUpdateShape.upsertPhoneNumbers, removePhoneLabels: cardUpdateShape.removePhoneLabels,
         reason: reasonParam,
-    }, async ({ contactKey, reason, ...f }) => {
+    }, async ({ contactKey, reason, emailAddresses, addEmailAddresses, removeEmailAddresses, phoneNumbers, upsertPhoneNumbers, removePhoneLabels, ...f }) => {
         const body = {};
         const map = { firstName: "FirstName", middleName: "MiddleName", lastName: "LastName", preferredName: "PreferredName", salutation: "Salutation", suffix: "Suffix" };
         for (const [k, v] of Object.entries(f))
             if (v !== undefined)
                 body[map[k]] = v;
-        if (!Object.keys(body).length)
+        const card = { emailAddresses, addEmailAddresses, removeEmailAddresses, phoneNumbers, upsertPhoneNumbers, removePhoneLabels };
+        const cardWanted = Object.values(card).some(v => v !== undefined);
+        if (!Object.keys(body).length && !cardWanted)
             return err("No fields provided to update.");
         const path = `/Contacts/${enc(contactKey)}`;
-        const w = await verifiedWrite({
-            tool: "update_contact", reason,
-            read: async () => (await kget(path) ?? {}),
-            build: () => ({ method: "PATCH", path, body }),
-            verify: (after) => { const fl = []; for (const [k, v] of Object.entries(body))
-                expectEqual(fl, k, v, after[k]); return fl; },
-        });
-        return writeResult(w, { reason, contactKey, before: pick(w.before, Object.keys(body)), after: w.after && pick(w.after, Object.keys(body)) });
+        let cardKey = null;
+        if (cardWanted) {
+            const cards = (await kget(`${path}?$expand=BusinessCards`) ?? {}).BusinessCards ?? [];
+            const primary = cards.find(c => c.IsPrimaryCard) ?? (cards.length === 1 ? cards[0] : undefined);
+            if (!primary?.BusinessCardKey)
+                return err(cards.length ? "The contact has several Business Cards and none is primary; use update_business_card with the card's key. Nothing was changed." : "The contact has no Business Card to hold emails or phones; add one in Karbon first. Nothing was changed.");
+            cardKey = String(primary.BusinessCardKey);
+        }
+        const out = { contactKey, reason };
+        let ok = true;
+        if (Object.keys(body).length) {
+            const w = await verifiedWrite({
+                tool: "update_contact", reason,
+                read: async () => (await kget(path) ?? {}),
+                build: () => ({ method: "PATCH", path, body }),
+                verify: (after) => { const fl = []; for (const [k, v] of Object.entries(body))
+                    expectEqual(fl, k, v, after[k]); return fl; },
+            });
+            ok = w.ok;
+            out.name = {
+                ok: w.ok, verified: w.verified, status: w.status,
+                ...(w.error ? { error: w.error } : {}), ...(w.failures.length ? { failures: w.failures } : {}),
+                before: pick(w.before, Object.keys(body)), after: w.after && pick(w.after, Object.keys(body)),
+            };
+        }
+        if (cardKey && ok) {
+            const r = await updateBusinessCard({ businessCardKey: cardKey, ...card, reason });
+            ok = r.ok === true;
+            out.businessCard = r;
+        }
+        else if (cardKey) {
+            out.businessCard = { ok: false, error: "Skipped because the name change failed." };
+        }
+        return text({ ok, ...out });
     });
     s.tool("get_contact_by_identifier", "Look up a contact by your own UserDefinedIdentifier (external key)", {
         identifier: z.string().describe("Your UserDefinedIdentifier for the contact"),
         expandBusinessCards: z.boolean().optional().default(false).describe("Include BusinessCards (emails, phones, addresses)"),
     }, async ({ identifier, expandBusinessCards }) => text(await kget(`/Contacts/GetContactByUserDefinedIdentifier(UserDefinedIdentifier=${keyLit(identifier)})${expandBusinessCards ? "?$expand=BusinessCards" : ""}`)));
     // ── ORGANIZATIONS ─────────────────────────────────────────────────────────
-    s.tool("list_organizations", "List organizations from Karbon. Follows @odata.nextLink up to maxRecords; returns @odata.nextLink if more exist.", {
+    s.tool("list_organizations", "List organizations from Karbon. Follows @odata.nextLink up to maxRecords; returns @odata.nextLink if more exist. Filters accept eq, contains and and only (no or, no startswith).", {
         filter: z.string().optional().describe("OData filter on FullName, EmailAddress, ContactType or ExternalKey"),
         orderBy: z.enum(["FullName", "FullName desc", "LastModifiedDateTime", "LastModifiedDateTime desc"]).optional(),
+        includeDescription: includeDescriptionParam,
         ...listParams,
-    }, async ({ filter, orderBy, maxRecords, nextLink }) => text(await listing("/Organizations", { $filter: filter, $orderby: orderBy }, maxRecords, nextLink)));
+    }, async ({ filter, orderBy, includeDescription, maxRecords, nextLink }) => {
+        const p = await pageAll("/Organizations", { $filter: filter, $orderby: orderBy }, { maxRecords, from: nextLink });
+        if (includeDescription)
+            await addDescriptions(p.value, "Organization");
+        return text(pageResult(p));
+    });
     s.tool("get_organization", "Get a single organization by key. Optionally expand BusinessCards (emails, phones, addresses), ClientTeam, Contacts or ServiceTypes — off by default because $expand adds latency.", {
         organizationKey: z.string(),
         expand: z.array(z.enum(["BusinessCards", "ClientTeam", "Contacts", "ServiceTypes"])).optional().describe("Related data to include"),
@@ -696,6 +743,7 @@ export function createServer() {
     registerCustomFieldTools(s);
     // ── BUSINESS CARDS (src/businessCards.ts) ─────────────────────────────────
     registerBusinessCardTools(s);
+    registerClientRecordTools(s);
     // ── CLIENT GROUP AUDIT (src/groupAudit.ts) ────────────────────────────────
     registerGroupAuditTools(s);
     return s;

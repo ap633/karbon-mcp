@@ -78,138 +78,142 @@ export function cardPutBody(cur, key) {
     body.Addresses = (cur.Addresses ?? []).map(({ AddressKey, ...a }) => a);
     return body;
 }
+// update_business_card's parameters. Also used by update_contact, which edits
+// the contact's primary card.
+export const cardUpdateShape = {
+    businessCardKey: z.string(),
+    emailAddresses: z.array(z.string().email()).optional().describe("Replace all email addresses"),
+    addEmailAddresses: z.array(z.string().email()).optional(),
+    removeEmailAddresses: z.array(z.string()).optional(),
+    webSites: z.array(z.string()).optional().describe("Replace all websites"),
+    phoneNumbers: z.array(phoneIn).optional().describe("Replace all phone numbers"),
+    upsertPhoneNumbers: z.array(phoneIn).optional().describe("Set the phone with this label (replaces the existing one with that label, or adds it)"),
+    removePhoneLabels: z.array(z.enum(PHONE_LABELS)).optional(),
+    addresses: z.array(addressIn).optional().describe("Replace all addresses"),
+    upsertAddresses: z.array(addressIn).optional().describe("Set the address with this label (replaces the existing one with that label, or adds it)"),
+    removeAddressLabels: z.array(z.enum(ADDRESS_LABELS)).optional(),
+    roleOrTitle: z.string().nullable().optional(),
+    isPrimaryCard: z.boolean().optional(),
+    organizationKey: z.string().nullable().optional().describe("Contact cards only: link the contact to this Organization (null to unlink). Always null on Organization cards."),
+    facebookLink: z.string().optional(), linkedInLink: z.string().optional(), twitterLink: z.string().optional(), skypeLink: z.string().optional(),
+    reason: reasonParam,
+};
+export async function updateBusinessCard(a) {
+    const errors = [];
+    if (a.emailAddresses && (a.addEmailAddresses || a.removeEmailAddresses))
+        errors.push("Use emailAddresses (replace) or add/removeEmailAddresses, not both.");
+    if (a.phoneNumbers && (a.upsertPhoneNumbers || a.removePhoneLabels))
+        errors.push("Use phoneNumbers (replace) or upsertPhoneNumbers/removePhoneLabels, not both.");
+    if (a.addresses && (a.upsertAddresses || a.removeAddressLabels))
+        errors.push("Use addresses (replace) or upsertAddresses/removeAddressLabels, not both.");
+    for (const list of [a.upsertPhoneNumbers, a.upsertAddresses]) {
+        const labels = (list ?? []).map(x => x.label);
+        if (new Set(labels).size !== labels.length)
+            errors.push(`Each label can be upserted once: ${labels.join(", ")}.`);
+    }
+    // Convert and validate country codes up front.
+    const phones = a.phoneNumbers?.map(p => toPhone(p, errors));
+    const upPhones = a.upsertPhoneNumbers?.map(p => toPhone(p, errors));
+    const addrs = a.addresses?.map(x => toAddress(x, errors));
+    const upAddrs = a.upsertAddresses?.map(x => toAddress(x, errors));
+    if (errors.length)
+        return { ok: false, error: "Nothing was changed.", errors };
+    const path = `/BusinessCards/${enc(a.businessCardKey)}`;
+    // Applies the request to a freshly read card; also used on 409 retries.
+    const apply = (cur) => {
+        const errs = [];
+        const changes = {};
+        if (a.emailAddresses)
+            changes.EmailAddresses = a.emailAddresses;
+        if (a.addEmailAddresses || a.removeEmailAddresses) {
+            const remove = new Set((a.removeEmailAddresses ?? []).map(e => e.trim().toLowerCase()));
+            const list = (cur.EmailAddresses ?? []).filter(e => !remove.has(e.trim().toLowerCase()));
+            for (const e of a.addEmailAddresses ?? [])
+                if (!list.some(x => x.toLowerCase() === e.toLowerCase()))
+                    list.push(e);
+            changes.EmailAddresses = list;
+        }
+        if (a.webSites)
+            changes.WebSites = a.webSites;
+        const upsert = (existing, up, remove, what) => {
+            let list = existing.filter(x => !(remove ?? []).includes(x.Label));
+            for (const item of up ?? []) {
+                const same = list.filter(x => x.Label === item.Label);
+                if (same.length > 1) {
+                    errs.push(`The card has ${same.length} ${what}s labelled ${item.Label}; replace the whole list instead.`);
+                    continue;
+                }
+                list = same.length ? list.map(x => (x.Label === item.Label ? item : x)) : [...list, item];
+            }
+            return list;
+        };
+        const strip = (xs, k) => xs.map(({ [k]: _drop, ...rest }) => rest);
+        if (phones)
+            changes.PhoneNumbers = phones;
+        if (upPhones || a.removePhoneLabels)
+            changes.PhoneNumbers = upsert(strip(cur.PhoneNumbers ?? [], "PhoneNumberKey"), upPhones, a.removePhoneLabels, "phone number");
+        if (addrs)
+            changes.Addresses = addrs;
+        if (upAddrs || a.removeAddressLabels)
+            changes.Addresses = upsert(strip(cur.Addresses ?? [], "AddressKey"), upAddrs, a.removeAddressLabels, "address");
+        if (a.roleOrTitle !== undefined)
+            changes.RoleOrTitle = a.roleOrTitle;
+        if (a.isPrimaryCard !== undefined)
+            changes.IsPrimaryCard = a.isPrimaryCard;
+        if (a.organizationKey !== undefined) {
+            if (cur.EntityType === "Organization" && a.organizationKey)
+                errs.push("OrganizationKey is always null on an Organization's card; it only links a Contact to an Organization.");
+            else
+                changes.OrganizationKey = a.organizationKey;
+        }
+        for (const [k, f] of [["FacebookLink", a.facebookLink], ["LinkedInLink", a.linkedInLink], ["TwitterLink", a.twitterLink], ["SkypeLink", a.skypeLink]])
+            if (f !== undefined)
+                changes[k] = f;
+        return { changes, errors: errs };
+    };
+    // Check the request against the current card before writing anything.
+    const first = apply((await kget(path) ?? {}));
+    if (first.errors.length)
+        return { ok: false, error: "Nothing was changed.", errors: first.errors };
+    if (!Object.keys(first.changes).length)
+        return { ok: false, error: "No changes requested." };
+    let changes = first.changes;
+    const w = await verifiedWrite({
+        tool: "update_business_card", reason: a.reason,
+        read: async () => (await kget(path) ?? {}),
+        build: (cur) => {
+            changes = apply(cur).changes;
+            return { method: "PUT", path, body: { ...cardPutBody(cur, a.businessCardKey), ...changes } };
+        },
+        verify: (after, before) => {
+            const f = [];
+            for (const [field, norm] of Object.entries(CARD_FIELDS)) {
+                const expected = field in changes ? changes[field] : before[field];
+                if (norm(expected) !== norm(after[field])) {
+                    f.push(field in changes
+                        ? `${field}: expected ${JSON.stringify(expected)}, got ${JSON.stringify(after[field] ?? null)}`
+                        : `${field} changed unexpectedly: was ${JSON.stringify(before[field] ?? null)}, now ${JSON.stringify(after[field] ?? null)}`);
+                }
+            }
+            if (s0(after.EntityKey) !== s0(before.EntityKey))
+                f.push("EntityKey changed unexpectedly");
+            return f;
+        },
+    });
+    const fields = Object.keys(changes);
+    const pick = (o) => o && Object.fromEntries(fields.map(k => [k, o[k] ?? null]));
+    return {
+        ok: w.ok, verified: w.verified, status: w.status, reason: a.reason, businessCardKey: a.businessCardKey,
+        entity: { EntityType: w.before.EntityType ?? null, EntityKey: w.before.EntityKey ?? null },
+        ...(w.conflictRetries ? { conflictRetries: w.conflictRetries } : {}),
+        ...(w.error ? { error: w.error } : {}),
+        ...(w.failures.length ? { failures: w.failures } : {}),
+        before: pick(w.before), after: pick(w.after),
+    };
+}
 export function registerBusinessCardTools(s) {
     s.tool("get_business_card", "Get a Business Card (emails, phones, addresses, websites, role, social links) by BusinessCardKey. Find the key with get_contact / get_organization and expand: ['BusinessCards'].", {
         businessCardKey: z.string(),
     }, async ({ businessCardKey }) => text(await kget(`/BusinessCards/${enc(businessCardKey)}`)));
-    s.tool("update_business_card", `Change a Business Card. Pass only what should change; everything else on the card is kept. Lists can be replaced whole (emailAddresses, webSites, phoneNumbers, addresses) or edited: add/remove emails, upsert/remove phones and addresses by label. Phone labels: ${PHONE_LABELS.join(", ")}. Address labels: ${ADDRESS_LABELS.join(", ")}. Country codes are ISO 3166-1 alpha-2 and default to ${DEFAULT_COUNTRY}. Karbon's PUT replaces the whole card, so this reads it, merges, PUTs, then reads back to confirm the changes and that nothing else moved. Requires a \`reason\`.`, {
-        businessCardKey: z.string(),
-        emailAddresses: z.array(z.string().email()).optional().describe("Replace all email addresses"),
-        addEmailAddresses: z.array(z.string().email()).optional(),
-        removeEmailAddresses: z.array(z.string()).optional(),
-        webSites: z.array(z.string()).optional().describe("Replace all websites"),
-        phoneNumbers: z.array(phoneIn).optional().describe("Replace all phone numbers"),
-        upsertPhoneNumbers: z.array(phoneIn).optional().describe("Set the phone with this label (replaces the existing one with that label, or adds it)"),
-        removePhoneLabels: z.array(z.enum(PHONE_LABELS)).optional(),
-        addresses: z.array(addressIn).optional().describe("Replace all addresses"),
-        upsertAddresses: z.array(addressIn).optional().describe("Set the address with this label (replaces the existing one with that label, or adds it)"),
-        removeAddressLabels: z.array(z.enum(ADDRESS_LABELS)).optional(),
-        roleOrTitle: z.string().nullable().optional(),
-        isPrimaryCard: z.boolean().optional(),
-        organizationKey: z.string().nullable().optional().describe("Contact cards only: link the contact to this Organization (null to unlink). Always null on Organization cards."),
-        facebookLink: z.string().optional(), linkedInLink: z.string().optional(), twitterLink: z.string().optional(), skypeLink: z.string().optional(),
-        reason: reasonParam,
-    }, async (a) => {
-        const errors = [];
-        if (a.emailAddresses && (a.addEmailAddresses || a.removeEmailAddresses))
-            errors.push("Use emailAddresses (replace) or add/removeEmailAddresses, not both.");
-        if (a.phoneNumbers && (a.upsertPhoneNumbers || a.removePhoneLabels))
-            errors.push("Use phoneNumbers (replace) or upsertPhoneNumbers/removePhoneLabels, not both.");
-        if (a.addresses && (a.upsertAddresses || a.removeAddressLabels))
-            errors.push("Use addresses (replace) or upsertAddresses/removeAddressLabels, not both.");
-        for (const list of [a.upsertPhoneNumbers, a.upsertAddresses]) {
-            const labels = (list ?? []).map(x => x.label);
-            if (new Set(labels).size !== labels.length)
-                errors.push(`Each label can be upserted once: ${labels.join(", ")}.`);
-        }
-        // Convert and validate country codes up front.
-        const phones = a.phoneNumbers?.map(p => toPhone(p, errors));
-        const upPhones = a.upsertPhoneNumbers?.map(p => toPhone(p, errors));
-        const addrs = a.addresses?.map(x => toAddress(x, errors));
-        const upAddrs = a.upsertAddresses?.map(x => toAddress(x, errors));
-        if (errors.length)
-            return text({ ok: false, error: "Nothing was changed.", errors });
-        const path = `/BusinessCards/${enc(a.businessCardKey)}`;
-        // Applies the request to a freshly read card; also used on 409 retries.
-        const apply = (cur) => {
-            const errs = [];
-            const changes = {};
-            if (a.emailAddresses)
-                changes.EmailAddresses = a.emailAddresses;
-            if (a.addEmailAddresses || a.removeEmailAddresses) {
-                const remove = new Set((a.removeEmailAddresses ?? []).map(e => e.trim().toLowerCase()));
-                const list = (cur.EmailAddresses ?? []).filter(e => !remove.has(e.trim().toLowerCase()));
-                for (const e of a.addEmailAddresses ?? [])
-                    if (!list.some(x => x.toLowerCase() === e.toLowerCase()))
-                        list.push(e);
-                changes.EmailAddresses = list;
-            }
-            if (a.webSites)
-                changes.WebSites = a.webSites;
-            const upsert = (existing, up, remove, what) => {
-                let list = existing.filter(x => !(remove ?? []).includes(x.Label));
-                for (const item of up ?? []) {
-                    const same = list.filter(x => x.Label === item.Label);
-                    if (same.length > 1) {
-                        errs.push(`The card has ${same.length} ${what}s labelled ${item.Label}; replace the whole list instead.`);
-                        continue;
-                    }
-                    list = same.length ? list.map(x => (x.Label === item.Label ? item : x)) : [...list, item];
-                }
-                return list;
-            };
-            const strip = (xs, k) => xs.map(({ [k]: _drop, ...rest }) => rest);
-            if (phones)
-                changes.PhoneNumbers = phones;
-            if (upPhones || a.removePhoneLabels)
-                changes.PhoneNumbers = upsert(strip(cur.PhoneNumbers ?? [], "PhoneNumberKey"), upPhones, a.removePhoneLabels, "phone number");
-            if (addrs)
-                changes.Addresses = addrs;
-            if (upAddrs || a.removeAddressLabels)
-                changes.Addresses = upsert(strip(cur.Addresses ?? [], "AddressKey"), upAddrs, a.removeAddressLabels, "address");
-            if (a.roleOrTitle !== undefined)
-                changes.RoleOrTitle = a.roleOrTitle;
-            if (a.isPrimaryCard !== undefined)
-                changes.IsPrimaryCard = a.isPrimaryCard;
-            if (a.organizationKey !== undefined) {
-                if (cur.EntityType === "Organization" && a.organizationKey)
-                    errs.push("OrganizationKey is always null on an Organization's card; it only links a Contact to an Organization.");
-                else
-                    changes.OrganizationKey = a.organizationKey;
-            }
-            for (const [k, f] of [["FacebookLink", a.facebookLink], ["LinkedInLink", a.linkedInLink], ["TwitterLink", a.twitterLink], ["SkypeLink", a.skypeLink]])
-                if (f !== undefined)
-                    changes[k] = f;
-            return { changes, errors: errs };
-        };
-        // Check the request against the current card before writing anything.
-        const first = apply((await kget(path) ?? {}));
-        if (first.errors.length)
-            return text({ ok: false, error: "Nothing was changed.", errors: first.errors });
-        if (!Object.keys(first.changes).length)
-            return text({ ok: false, error: "No changes requested." });
-        let changes = first.changes;
-        const w = await verifiedWrite({
-            tool: "update_business_card", reason: a.reason,
-            read: async () => (await kget(path) ?? {}),
-            build: (cur) => {
-                changes = apply(cur).changes;
-                return { method: "PUT", path, body: { ...cardPutBody(cur, a.businessCardKey), ...changes } };
-            },
-            verify: (after, before) => {
-                const f = [];
-                for (const [field, norm] of Object.entries(CARD_FIELDS)) {
-                    const expected = field in changes ? changes[field] : before[field];
-                    if (norm(expected) !== norm(after[field])) {
-                        f.push(field in changes
-                            ? `${field}: expected ${JSON.stringify(expected)}, got ${JSON.stringify(after[field] ?? null)}`
-                            : `${field} changed unexpectedly: was ${JSON.stringify(before[field] ?? null)}, now ${JSON.stringify(after[field] ?? null)}`);
-                    }
-                }
-                if (s0(after.EntityKey) !== s0(before.EntityKey))
-                    f.push("EntityKey changed unexpectedly");
-                return f;
-            },
-        });
-        const fields = Object.keys(changes);
-        const pick = (o) => o && Object.fromEntries(fields.map(k => [k, o[k] ?? null]));
-        return text({
-            ok: w.ok, verified: w.verified, status: w.status, reason: a.reason, businessCardKey: a.businessCardKey,
-            entity: { EntityType: w.before.EntityType ?? null, EntityKey: w.before.EntityKey ?? null },
-            ...(w.conflictRetries ? { conflictRetries: w.conflictRetries } : {}),
-            ...(w.error ? { error: w.error } : {}),
-            ...(w.failures.length ? { failures: w.failures } : {}),
-            before: pick(w.before), after: pick(w.after),
-        });
-    });
+    s.tool("update_business_card", `Change a Business Card. Pass only what should change; everything else on the card is kept. Lists can be replaced whole (emailAddresses, webSites, phoneNumbers, addresses) or edited: add/remove emails, upsert/remove phones and addresses by label. Phone labels: ${PHONE_LABELS.join(", ")}. Address labels: ${ADDRESS_LABELS.join(", ")}. Country codes are ISO 3166-1 alpha-2 and default to ${DEFAULT_COUNTRY}. Karbon's PUT replaces the whole card, so this reads it, merges, PUTs, then reads back to confirm the changes and that nothing else moved. Requires a \`reason\`.`, cardUpdateShape, async (a) => text(await updateBusinessCard(a)));
 }
