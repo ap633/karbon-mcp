@@ -34,7 +34,7 @@ Only endpoints listed in the spec are used. Never derive endpoints from `/v3/$me
 
 ## How every call behaves
 
-- **Paging.** List tools request `$top` ≤ 100 and follow `@odata.nextLink`. They never build `$skip` themselves. `maxRecords` (default 100) caps how much is read. If more records exist, the result includes `@odata.nextLink`; pass it back as `nextLink` to continue. A nextLink is only followed if it points at `api.karbonhq.com`.
+- **Paging.** List tools request `$top` ≤ 100 (10 for `/WorkTemplates`, Karbon's limit there) and follow `@odata.nextLink`. They never build `$skip` themselves. `maxRecords` (default 100) caps how much is read. If more records exist, the result includes `@odata.nextLink`; pass it back as `nextLink` to continue. A nextLink is only followed if it points at `api.karbonhq.com`.
 - **429.** The client waits the delay given in Karbon's message ("Try again in 10 seconds"), falling back to `Retry-After`, then 10 seconds. It retries up to 5 attempts in total. 5xx errors are retried with backoff.
 - **409 (code 4020).** Writes re-fetch the record, reapply the change and retry, at most twice more. If the conflict persists, the tool fails with a clear message.
 - **Verified writes.** Every write reads the record back and returns `ok: true` only if the change persisted. A `204` with no change is reported as `ok: false` with `failures`. Each write tool requires a `reason`, and an audit line is logged.
@@ -92,7 +92,7 @@ Only endpoints listed in the spec are used. Never derive endpoints from `/v3/$me
 | `update_work_deadline` | write (PATCH) |
 | `update_work_status` | write (PUT): PrimaryStatus plus SecondaryStatus checked against TenantSettings for both the PrimaryStatus and the WorkType; fails if SecondaryStatus reads back null |
 | `update_karbon_workitem_fee_budget` | write (PUT): FeeSettings `FixedFee` + value, or `TimeAndMaterials` / `NonBillable` with value null |
-| `list_work_templates`, `get_work_template` | |
+| `list_work_templates`, `get_work_template` | list reads 10 per request (Karbon rejects `$top` above 10 on `/WorkTemplates` with 4002) and follows `@odata.nextLink` up to `maxRecords` |
 
 ### Budgets (Estimate Summaries)
 | Tool | Notes |
