@@ -30,8 +30,12 @@ const listParams = {
 };
 const reasonParam = z.string().trim().min(1).describe("Why this change is being made — required for auditability");
 
-const listing = (path: string, params: Record<string, string | number | boolean | undefined>, maxRecords: number, nextLink?: string) =>
-  pageAll(path, params, { maxRecords, from: nextLink }).then(pageResult);
+// pageSize: rows per request, for endpoints whose $top limit is below PAGE_SIZE (100).
+const listing = (path: string, params: Record<string, string | number | boolean | undefined>, maxRecords: number, nextLink?: string, pageSize?: number) =>
+  pageAll(path, params, { maxRecords, from: nextLink, pageSize }).then(pageResult);
+
+// GET /v3/WorkTemplates rejects $top above 10 (4002); every other list endpoint allows 100.
+const WORK_TEMPLATES_PAGE_SIZE = 10;
 
 const includeDescriptionParam = z.boolean().optional().default(false)
   .describe("Add each record's Description. Karbon's list doesn't return it, so this costs one GET per record — keep maxRecords small.");
@@ -448,11 +452,13 @@ export function createServer() {
   });
 
   // ── WORK TEMPLATES ────────────────────────────────────────────────────────
-  s.tool("list_work_templates", "List work templates. Follows @odata.nextLink up to maxRecords.", {
+  s.tool("list_work_templates", "List work templates. Karbon returns at most 10 per request, so this reads 10 at a time and follows @odata.nextLink up to maxRecords; returns @odata.nextLink if more exist.", {
     filter: z.string().optional().describe("OData eq filter on Title, WorkTypeKey, etc."),
     ...listParams,
+    maxRecords: z.number().int().min(1).max(2000).optional().default(100)
+      .describe("Stop after about this many templates (read 10 at a time, following @odata.nextLink). Default 100."),
   }, async ({ filter, maxRecords, nextLink }) =>
-    text(await listing("/WorkTemplates", { $filter: filter }, maxRecords, nextLink)));
+    text(await listing("/WorkTemplates", { $filter: filter }, maxRecords, nextLink, WORK_TEMPLATES_PAGE_SIZE)));
 
   s.tool("get_work_template", "Get a single work template by key", { workTemplateKey: z.string() }, async ({ workTemplateKey }) =>
     text(await kget(`/WorkTemplates/${enc(workTemplateKey)}`)));
