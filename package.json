@@ -6,7 +6,7 @@
   "scripts": {
     "build": "echo build skipped",
     "start": "node dist/index.js",
-    "test": "tsc && node --test test/groupAudit.test.mjs test/phase1.test.mjs test/phase2.test.mjs test/phase3.test.mjs"
+    "test": "tsc && node --test test/groupAudit.test.mjs test/phase1.test.mjs test/phase2.test.mjs test/phase3.test.mjs test/clientRecords.test.mjs"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.0.0",

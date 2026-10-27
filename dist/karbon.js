@@ -143,6 +143,19 @@ export function pageResult(p) {
         ...(p.nextLink ? { "@odata.nextLink": p.nextLink, more: "More records exist: call again with nextLink set to @odata.nextLink." } : {}),
     };
 }
+// Run fn over items with at most `limit` in flight, keeping input order.
+export async function mapLimit(items, limit, fn) {
+    const results = new Array(items.length);
+    let next = 0;
+    const worker = async () => {
+        while (next < items.length) {
+            const i = next++;
+            results[i] = await fn(items[i]);
+        }
+    };
+    await Promise.all(Array.from({ length: Math.min(limit, items.length) }, worker));
+    return results;
+}
 // ── PrimaryStatus ────────────────────────────────────────────────────────────
 export const PRIMARY_STATUSES = ["Planned", "Ready To Start", "In Progress", "Waiting", "Completed"];
 const statusId = (s) => s.replace(/\s+/g, "").toLowerCase();
