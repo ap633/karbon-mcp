@@ -17,6 +17,7 @@ Only endpoints listed in the spec are used. Never derive endpoints from `/v3/$me
 | `src/server.ts` | `createServer()`, which registers every tool |
 | `src/karbon.ts` | Shared Karbon client: auth, 429/409 handling, paging, PrimaryStatus helpers, TenantSettings cache, verified writes |
 | `src/groupAudit.ts` | Client-group audit tools |
+| `src/customFields.ts` | Custom field definitions and values |
 | `test/*.test.mjs` | Mocked-Karbon tests, run against `dist/` |
 
 `dist/` is committed. Railway builds with `npx tsc` (see `nixpacks.toml`).
@@ -89,6 +90,15 @@ Only endpoints listed in the spec are used. Never derive endpoints from `/v3/$me
 | `update_karbon_estimate_minutes` | write (PATCH): EstimateMinutes **or** EstimateAmount (per the firm's Time and Budget setting), and/or HourlyRate. Follows `OData-EntityId` if the key is reissued. Refuses `0-` keys. |
 | `preview_karbon_estimate_summary_update` | read-only diff |
 
+### Custom fields
+| Tool | Notes |
+| --- | --- |
+| `list_custom_fields` | definitions: Key, Name, Type, visibility, ListOptions |
+| `get_custom_field_values` | values for a Contact or Organization key; `resolveColleagues` turns Colleague UserKeys into names and emails (one `GET /v3/Users/{key}` per user) |
+| `set_custom_field_values` | write: pass only the fields to change (by key or name). Values are checked by type: list options must match, Colleague takes UserKeys or emails, `null`/`[]` clears. Reads the full set, merges, PUTs, then checks the changes **and** that every other field kept its value. |
+| `create_custom_field` | write: list types need `listOptions`; refuses an existing name |
+| `delete_custom_field` | **destructive** write: removes the field and its values from every client. Needs `confirm: true`; without it, the tool shows what would be deleted. |
+
 ### Time
 | Tool | Notes |
 | --- | --- |
@@ -115,7 +125,7 @@ Only endpoints listed in the spec are used. Never derive endpoints from `/v3/$me
 npm test
 ```
 
-This compiles, then runs the mocked-Karbon tests. They cover: a write that reports success but doesn't persist, 409 and 429 retries, PrimaryStatus filters given in the no-space form, nextLink paging, SecondaryStatus validation, the estimate-key reissue, and fee rules.
+This compiles, then runs the mocked-Karbon tests. They cover: a write that reports success but doesn't persist, 409 and 429 retries, PrimaryStatus filters given in the no-space form, nextLink paging, SecondaryStatus validation, the estimate-key reissue, fee rules, and custom-field merge, validation and delete confirmation.
 
 ## Deploying
 

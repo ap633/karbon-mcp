@@ -203,7 +203,7 @@ export function validSecondaryStatuses(ts: TenantSettings, primary: string, work
 
 // ── Writes: conflict retry + read-back verification ──────────────────────────
 
-export type WriteRequest = { method: "POST" | "PUT" | "PATCH"; path: string; body: unknown };
+export type WriteRequest = { method: "POST" | "PUT" | "PATCH" | "DELETE"; path: string; body?: unknown };
 
 export type VerifiedWrite = {
   ok: boolean;

@@ -1,6 +1,7 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { registerGroupAuditTools } from "./groupAudit.js";
+import { registerCustomFieldTools } from "./customFields.js";
 import {
   kget, pageAll, pageResult, qs, odataString, text, KarbonError,
   PRIMARY_STATUSES, toSpacedStatus, sameStatus, normalizeStatusFilter,
@@ -701,6 +702,9 @@ export function createServer() {
     ]);
     return text({ contacts, organizations: orgs, work });
   });
+
+  // ── CUSTOM FIELDS (src/customFields.ts) ───────────────────────────────────
+  registerCustomFieldTools(s);
 
   // ── CLIENT GROUP AUDIT (src/groupAudit.ts) ────────────────────────────────
   registerGroupAuditTools(s);
