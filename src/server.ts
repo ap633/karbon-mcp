@@ -4,6 +4,7 @@ import { registerGroupAuditTools } from "./groupAudit.js";
 import { registerCustomFieldTools } from "./customFields.js";
 import { registerBusinessCardTools, updateBusinessCard, cardUpdateShape } from "./businessCards.js";
 import { registerClientRecordTools, addDescriptions } from "./clientRecords.js";
+import { registerUploadWatchTools } from "./uploadWatch.js";
 import {
   kget, pageAll, pageResult, qs, odataString, text, KarbonError,
   PRIMARY_STATUSES, toSpacedStatus, sameStatus, normalizeStatusFilter,
@@ -779,6 +780,9 @@ export function createServer() {
 
   // ── CLIENT GROUP AUDIT (src/groupAudit.ts) ────────────────────────────────
   registerGroupAuditTools(s);
+
+  // ── CLIENT PORTAL UPLOADS (src/uploadWatch.ts) ────────────────────────────
+  registerUploadWatchTools(s);
 
   return s;
 }

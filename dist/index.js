@@ -3,6 +3,7 @@ import { isInitializeRequest } from "@modelcontextprotocol/sdk/types.js";
 import http from "http";
 import { randomUUID } from "crypto";
 import { createServer } from "./server.js";
+import { startUploadWatch, watchConfigFromEnv } from "./uploadWatch.js";
 // Tools live in src/server.ts; the Karbon client (auth, retries, paging,
 // write verification) in src/karbon.ts. This file is only the HTTP transport.
 const PORT = process.env.PORT ? parseInt(process.env.PORT) : 3000;
@@ -77,3 +78,7 @@ const httpServer = http.createServer(async (req, res) => {
     res.end("Not found");
 });
 httpServer.listen(PORT, () => console.log(`Karbon MCP server running on port ${PORT}`));
+// Client portal upload watch: off unless UPLOAD_WATCH_ENABLED=true (see README).
+const watchConfig = watchConfigFromEnv();
+if (watchConfig)
+    startUploadWatch(watchConfig);
