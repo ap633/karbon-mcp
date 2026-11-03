@@ -16,15 +16,22 @@ console.log = () => {};
 const API = "https://api.karbonhq.com/v3";
 const json = (body, status = 200) => new Response(JSON.stringify(body), { status, headers: { "Content-Type": "application/json" } });
 
-const contacts = [{ ContactKey: "C1", FullName: "Jane Smith" }, { ContactKey: "C2", FullName: "Bob Jones" }];
+const baseContacts = [{ ContactKey: "C1", FullName: "Jane Smith" }, { ContactKey: "C2", FullName: "Bob Jones" }];
 const orgs = [{ OrganizationKey: "O1", FullName: "Smith Pty Ltd" }];
-let files, log, mail;
+let contacts, files, log, mail;
+
+// Pages by $top/$skip and, like the live Contacts list, sends no @odata.nextLink.
+const pageNoLink = (rows, u) => {
+  const top = Number(u.searchParams.get("$top") ?? 100), skip = Number(u.searchParams.get("$skip") ?? 0);
+  return json({ value: rows.slice(skip, skip + top) });
+};
 
 const file = (key, date, extra = {}) => ({ FileContextKey: key, FileName: `${key}.pdf`, FileSize: 20480, MimeType: "application/pdf", Source: "Contact", DateCreated: date, IsShared: true, IsArchived: false, ...extra });
 
 beforeEach(() => {
   log = [];
   mail = [];
+  contacts = baseContacts;
   files = { C1: [], C2: [], O1: [] };
 });
 
@@ -34,8 +41,8 @@ globalThis.fetch = async (url, opts = {}) => {
   if (u.hostname === "graph.microsoft.com") { mail.push({ url: u, body: JSON.parse(opts.body) }); return new Response(null, { status: 202 }); }
   const p = decodeURIComponent(u.pathname).replace(/^\/v3/i, "");
   log.push(u);
-  if (p === "/Contacts") return json({ value: contacts });
-  if (p === "/Organizations") return json({ value: orgs });
+  if (p === "/Contacts") return pageNoLink(contacts, u);
+  if (p === "/Organizations") return pageNoLink(orgs, u);
   const m = p.match(/^\/FileList\/(Contact|Organization)$/);
   if (m) {
     const key = u.searchParams.get("EntityKey");
@@ -71,6 +78,18 @@ test("scan pages past 20 files when they are all new", async () => {
   files.C2 = Array.from({ length: 45 }, (_, i) => file(`f${i}`, new Date(Date.UTC(2026, 9, 30, 1, i)).toISOString()));
   const r = await scanUploads({ since: new Date("2026-10-30T00:00:00Z"), kinds: ["Contact"] });
   assert.equal(r.uploads.length, 45);
+});
+
+test("scans every client when Karbon sends no nextLink (live: first run stopped at 100)", async () => {
+  contacts = Array.from({ length: 250 }, (_, i) => ({ ContactKey: `K${i}`, FullName: `Client ${i}` }));
+  for (const c of contacts) files[c.ContactKey] = [];
+  files.K249 = [file("last", "2026-10-30T02:00:00Z")];
+  const r = await scanUploads({ since: new Date("2026-10-30T00:00:00Z"), kinds: ["Contact"], contactType: "Client" });
+  assert.equal(r.scanned.Contact, 250);
+  assert.deepEqual(r.uploads.map(u => u.fileKey), ["last"]);
+  const listCalls = log.filter(u => u.pathname.endsWith("/Contacts"));
+  assert.deepEqual(listCalls.map(u => u.searchParams.get("$skip")), [null, "100", "200"]);
+  assert.ok(listCalls.every(u => u.searchParams.get("$filter") === "ContactType eq 'Client'"), "filter kept on every page");
 });
 
 test("contactType filters the client list on Karbon's side", async () => {

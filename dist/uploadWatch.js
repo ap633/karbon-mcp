@@ -12,7 +12,7 @@
 //   Karbon already notifies those.
 import fs from "fs";
 import { z } from "zod";
-import { kget, mapLimit, odataString, pageAll, qs, text } from "./karbon.js";
+import { kget, mapLimit, odataString, PAGE_SIZE, qs, text } from "./karbon.js";
 const KINDS = {
     Contact: { path: "/Contacts", key: "ContactKey" },
     Organization: { path: "/Organizations", key: "OrganizationKey" },
@@ -37,11 +37,29 @@ async function filesSince(kind, key, since, includeWorkItemFiles) {
             return out;
     }
 }
+// Every Contact or Organization. Seen live (first run, 4 Nov 2026): these lists
+// can stop sending @odata.nextLink, so pageAll read exactly 100 of each. Follow
+// nextLink when given; otherwise a full page means there may be more, so step $skip.
+const MAX_CLIENTS = 20_000;
+async function everyClient(path, filter) {
+    const out = [];
+    let url = `${path}${qs({ $filter: filter, $top: PAGE_SIZE })}`;
+    for (let skip = 0; url && out.length < MAX_CLIENTS;) {
+        const body = (await kget(url) ?? {});
+        const rows = body.value ?? [];
+        out.push(...rows);
+        skip += rows.length;
+        url = typeof body["@odata.nextLink"] === "string" ? body["@odata.nextLink"]
+            : rows.length === PAGE_SIZE ? `${path}${qs({ $filter: filter, $top: PAGE_SIZE, $skip: skip })}`
+                : null;
+    }
+    return out;
+}
 export async function scanUploads(o) {
     const result = { scanned: {}, uploads: [], errors: [] };
     for (const kind of o.kinds ?? ["Contact", "Organization"]) {
         const k = KINDS[kind];
-        const clients = (await pageAll(k.path, { $filter: o.contactType ? `ContactType eq ${odataString(o.contactType)}` : undefined }, { maxRecords: 20_000 })).value;
+        const clients = await everyClient(k.path, o.contactType ? `ContactType eq ${odataString(o.contactType)}` : undefined);
         result.scanned[kind] = clients.length;
         await mapLimit(clients, CONCURRENCY, async (c) => {
             const entityKey = String(c[k.key] ?? "");
