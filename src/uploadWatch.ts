@@ -14,7 +14,7 @@
 import fs from "fs";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
-import { kget, mapLimit, odataString, pageAll, qs, text, type Rec } from "./karbon.js";
+import { kget, mapLimit, odataString, PAGE_SIZE, qs, text, type Rec } from "./karbon.js";
 
 export type Kind = "Contact" | "Organization";
 const KINDS: Record<Kind, { path: string; key: string }> = {
@@ -63,11 +63,31 @@ async function filesSince(kind: Kind, key: string, since: Date, includeWorkItemF
   }
 }
 
+// Every Contact or Organization. Seen live (first run, 4 Nov 2026): these lists
+// can stop sending @odata.nextLink, so pageAll read exactly 100 of each. Follow
+// nextLink when given; otherwise a full page means there may be more, so step $skip.
+const MAX_CLIENTS = 20_000;
+
+async function everyClient(path: string, filter?: string): Promise<Rec[]> {
+  const out: Rec[] = [];
+  let url: string | null = `${path}${qs({ $filter: filter, $top: PAGE_SIZE })}`;
+  for (let skip = 0; url && out.length < MAX_CLIENTS; ) {
+    const body = (await kget(url) ?? {}) as Rec;
+    const rows = (body.value as Rec[] | undefined) ?? [];
+    out.push(...rows);
+    skip += rows.length;
+    url = typeof body["@odata.nextLink"] === "string" ? body["@odata.nextLink"] as string
+      : rows.length === PAGE_SIZE ? `${path}${qs({ $filter: filter, $top: PAGE_SIZE, $skip: skip })}`
+      : null;
+  }
+  return out;
+}
+
 export async function scanUploads(o: ScanOptions): Promise<ScanResult> {
   const result: ScanResult = { scanned: {}, uploads: [], errors: [] };
   for (const kind of o.kinds ?? ["Contact", "Organization"]) {
     const k = KINDS[kind];
-    const clients = (await pageAll(k.path, { $filter: o.contactType ? `ContactType eq ${odataString(o.contactType)}` : undefined }, { maxRecords: 20_000 })).value;
+    const clients = await everyClient(k.path, o.contactType ? `ContactType eq ${odataString(o.contactType)}` : undefined);
     result.scanned[kind] = clients.length;
     await mapLimit(clients, CONCURRENCY, async (c) => {
       const entityKey = String(c[k.key] ?? "");
