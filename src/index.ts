@@ -62,3 +62,14 @@ httpServer.listen(PORT, () => console.log(`Karbon MCP server running on port ${P
 // Client portal upload watch: off unless UPLOAD_WATCH_ENABLED=true (see README).
 const watchConfig = watchConfigFromEnv();
 if (watchConfig) startUploadWatch(watchConfig);
+
+// Railway sends SIGTERM when it replaces a deployment. Exit 0 so that isn't
+// reported as a crash (it emailed "Deployment crashed" on every deploy once the
+// volume meant the old container is stopped before the new one starts).
+for (const sig of ["SIGTERM", "SIGINT"] as const) {
+  process.on(sig, () => {
+    console.log(`${sig} received, shutting down`);
+    httpServer.close(() => process.exit(0));
+    setTimeout(() => process.exit(0), 3_000).unref();
+  });
+}

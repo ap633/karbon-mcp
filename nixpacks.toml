@@ -1,2 +1,7 @@
 [phases.build]
 cmds = ["npm ci --include=dev", "npx tsc"]
+
+# Run node directly, not through npm start, so Railway's SIGTERM reaches the
+# server's handler and npm doesn't log "command failed … signal SIGTERM".
+[start]
+cmd = "node dist/index.js"
