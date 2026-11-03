@@ -20,6 +20,7 @@ Only endpoints listed in the spec are used. Never derive endpoints from `/v3/$me
 | `src/customFields.ts` | Custom field definitions and values |
 | `src/businessCards.ts` | Business card read and verified update |
 | `src/clientRecords.ts` | Description and contact type writes, client group members, `list_all_clients` |
+| `src/uploadWatch.ts` | Client portal upload watch (timer + email) and `list_recent_client_uploads` |
 | `test/*.test.mjs` | Mocked-Karbon tests, run against `dist/` |
 
 `dist/` is committed. Railway builds with `npx tsc` (see `nixpacks.toml`).
@@ -31,6 +32,8 @@ Only endpoints listed in the spec are used. Never derive endpoints from `/v3/$me
 | `KARBON_GB_KEY` | `Authorization: Bearer …` |
 | `KARBON_ACCESS_KEY` | `AccessKey: …` |
 | `PORT` | HTTP port (default 3000) |
+
+The upload watch has its own settings: see [Client portal upload watch](#client-portal-upload-watch).
 
 ## How every call behaves
 
@@ -134,8 +137,39 @@ Only endpoints listed in the spec are used. Never derive endpoints from `/v3/$me
 | `list_users`, `get_user`, `list_team_members` | |
 | `search_karbon` | first 10 contacts, organizations and work items matching a keyword |
 
+### Client portal uploads
+| Tool | Notes |
+| --- | --- |
+| `list_recent_client_uploads` | Shared files that appeared on Contacts/Organizations in the last `sinceHours` (default 24). Read-only; scans every client, so it takes a few minutes. `includeWorkItemFiles` adds files attached through requests. |
+
 ### Removed
 - `list_work_tasks`, `update_task`: API v3 has no work-item task endpoint, so both returned 404.
+
+## Client portal upload watch
+
+Karbon notifies us when a client completes a request, but not when they upload a file through the portal's general upload area, and it has no file webhook. The watch fills that gap. Every `UPLOAD_WATCH_INTERVAL_MINUTES` it lists each Contact's and Organization's files (`GET /v3/FileList/{EntityType}`, filtered to `IsShared eq true and IsArchived eq false and Source eq '<kind>'`, newest first). It then sends one email listing any file it hasn't reported before, grouped by client.
+
+- **What it can't tell.** Karbon doesn't record who uploaded a file. Client uploads are always `IsShared`, but so are files staff share to the portal, so those appear too.
+- **Not included.** Files on work items (request uploads), because Karbon already notifies those. Client groups aren't covered either, because `FileList` doesn't support them.
+- **State.** `UPLOAD_WATCH_STATE_FILE` holds a watermark plus the file keys already emailed (kept 3 days). Each scan looks back 15 minutes past the watermark, so a file landing mid-scan isn't missed, and the key list stops it being emailed twice. The watermark only moves after the email has gone, so a failed send is retried on the next run. Put the file on a Railway volume. Without one, every redeploy starts fresh and looks back `UPLOAD_WATCH_INITIAL_LOOKBACK_MINUTES`.
+- **Load.** One FileList call per client per run, three at a time, with the shared 429 handling.
+
+| Variable | Default | What it's for |
+| --- | --- | --- |
+| `UPLOAD_WATCH_ENABLED` | off | `true` to start the watch |
+| `GRAPH_TENANT_ID`, `GRAPH_CLIENT_ID`, `GRAPH_CLIENT_SECRET` | — | Entra app with the **Mail.Send** application permission (admin consented) |
+| `UPLOAD_ALERT_FROM` | — | Mailbox the email is sent from, e.g. `info@dreamaccounting.com.au` |
+| `UPLOAD_ALERT_TO` | `info@dreamaccounting.com.au` | Comma-separated recipients |
+| `UPLOAD_WATCH_INTERVAL_MINUTES` | 30 | |
+| `UPLOAD_WATCH_STATE_FILE` | `./upload-watch-state.json` | Point at the volume, e.g. `/data/upload-watch-state.json` |
+| `UPLOAD_WATCH_INITIAL_LOOKBACK_MINUTES` | 60 | How far back the first run (no state file) looks |
+| `UPLOAD_WATCH_CONTACT_TYPE` | all | e.g. `Client` to scan only clients |
+| `KARBON_CONTACT_URL`, `KARBON_ORGANIZATION_URL` | none | Link template for the client name in the email, with `{key}`, e.g. copy a contact's URL from the browser and swap its key for `{key}` |
+
+Setup:
+1. In Entra (Azure) → App registrations, create an app (e.g. "Karbon upload alerts"). Add the Microsoft Graph application permission `Mail.Send` and grant admin consent, then create a client secret. To stop the app sending as anyone else, restrict it to the sending mailbox with an Exchange application access policy (or RBAC for Applications).
+2. In Railway, attach a volume to the `karbon-mcp` service (e.g. at `/data`) and set the variables above.
+3. Redeploy. The log shows `Upload watch every 30 min → …`, then one `{"uploadWatch":"run",…}` line per run with counts.
 
 ## Karbon API limits (don't build around these)
 
