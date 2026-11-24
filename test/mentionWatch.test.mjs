@@ -52,7 +52,7 @@ test("mentionsBot: user key or @name, not plain talk", () => {
 });
 
 test("parseEvents: single and batch payloads", () => {
-  assert.deepEqual(parseEvents({ ResourcePermaKey: "N1", ResourceType: "Note", ActionType: "Inserted" }), [{ key: "N1", type: "Note", action: "Inserted" }]);
+  assert.deepEqual(parseEvents({ ResourcePermaKey: "N1", ResourceType: "Note", ActionType: "Inserted" }), [{ key: "N1", type: "Note", action: "Inserted", parentKey: null }]);
   assert.equal(parseEvents({ BatchId: "x", Events: [{ ResourcePermaKey: "A", ResourceType: "Note", ActionType: "Updated" }, { ResourcePermaKey: "B", ResourceType: "Note", ActionType: "Deleted" }] }).length, 2);
   assert.deepEqual(parseEvents({}), []);
 });
@@ -144,4 +144,43 @@ test("HTTP: webhook needs the secret, queue needs the token", async () => {
   } finally {
     srv.close();
   }
+});
+
+test("a note and its comment tagging together get one answer, with a contact link", async () => {
+  const c = cfg();
+  const s = loadState(c.stateFile);
+  notes.N3 = {
+    Id: "N3", Subject: "Test", Body: "<p>@Dream Claude can you see this</p>", CreatedDate: later(1),
+    AuthorEmailAddress: "andrea@dreamaccounting.com.au", Timelines: [{ EntityType: "Contact", EntityKey: "K1" }],
+    Comments: [{ CommentKey: "C1", CommentBody: "@Dream Claude", CreatedDate: later(2), AuthorEmailAddress: "andrea@dreamaccounting.com.au" }],
+  };
+  const out = await handleEvents({ ResourcePermaKey: "N3", ResourceType: "Note", ActionType: "Inserted" }, s, c);
+  assert.deepEqual(out.map(m => m.id), ["comment:C1"]);
+  assert.equal(out[0].mentioned, true);
+  assert.equal(out[0].timelines[0].link, "https://app2.karbonhq.com/YJVCJnwyxrT#/contacts/K1");
+  assert.equal((await handleEvents({ ResourcePermaKey: "N3", ResourceType: "Note", ActionType: "Updated" }, s, c)).length, 0);
+});
+
+test("NoteComment event: an untagged 'yes' in Dream Claude's thread is queued; other threads aren't", async () => {
+  const c = cfg();
+  const s = loadState(c.stateFile);
+  notes.N4 = {
+    Id: "N4", Subject: "Fix", Body: "<p>@Dream Claude update the deadline</p>", CreatedDate: later(1),
+    AuthorEmailAddress: "andrea@dreamaccounting.com.au", Timelines: [], Comments: [],
+  };
+  await handleEvents({ ResourcePermaKey: "N4", ResourceType: "Note", ActionType: "Inserted" }, s, c);
+  notes.N4.Comments = [
+    { CommentKey: "B1", CommentBody: "I'll change it to 30/11/2026. Reply yes to go ahead.", CreatedDate: later(2), AuthorEmailAddress: "dreamclaude@dreamaccounting.com.au" },
+    { CommentKey: "Y1", CommentBody: "yes", CreatedDate: later(3), AuthorEmailAddress: "andrea@dreamaccounting.com.au" },
+  ];
+  const out = await handleEvents({ ResourcePermaKey: "Y1", ResourceType: "NoteComment", ActionType: "Inserted", ParentEntityType: "Note", ParentEntityKey: "N4" }, s, c);
+  assert.deepEqual(out.map(m => [m.id, m.mentioned]), [["comment:Y1", false]]);
+  assert.equal(out[0].thread.length, 3);
+
+  notes.N5 = {
+    Id: "N5", Subject: "Other", Body: "<p>Tamieka, please chase</p>", CreatedDate: later(1),
+    AuthorEmailAddress: "andrea@dreamaccounting.com.au", Timelines: [],
+    Comments: [{ CommentKey: "Z1", CommentBody: "done", CreatedDate: later(2), AuthorEmailAddress: "tamieka@dreamaccounting.com.au" }],
+  };
+  assert.equal((await handleEvents({ ResourcePermaKey: "Z1", ResourceType: "NoteComment", ActionType: "Inserted", ParentEntityKey: "N5" }, s, c)).length, 0);
 });

@@ -71,6 +71,10 @@ function timelineLink(entityType, entityKey, practiceKey) {
     const base = `https://app2.karbonhq.com/${practiceKey}`;
     if (/^work/i.test(entityType))
         return `${base}/work/${entityKey}`;
+    if (/^contact/i.test(entityType))
+        return `${base}#/contacts/${entityKey}`;
+    if (/^organi[sz]ation/i.test(entityType))
+        return `${base}#/organizations/${entityKey}`;
     return null;
 }
 // ---------- state ----------
@@ -104,7 +108,7 @@ export function parseEvents(body) {
     const list = Array.isArray(b.Events) ? b.Events : [b];
     return list
         .filter(e => e && typeof e.ResourcePermaKey === "string")
-        .map(e => ({ key: String(e.ResourcePermaKey), type: String(e.ResourceType ?? ""), action: String(e.ActionType ?? "") }));
+        .map(e => ({ key: String(e.ResourcePermaKey), type: String(e.ResourceType ?? ""), action: String(e.ActionType ?? ""), parentKey: e.ParentEntityKey ? String(e.ParentEntityKey) : null }));
 }
 function isStaff(email, cfg) {
     const e = email.trim().toLowerCase();
@@ -126,36 +130,49 @@ export async function processNote(noteId, s, cfg) {
     ];
     const thread = items.map(i => ({ kind: i.kind, authorEmail: i.authorEmail, createdDate: i.createdDate, text: htmlToText(i.raw) }));
     const seen = new Set(s.seen);
-    const out = [];
+    // Items to answer: new, by staff, and either tagging Dream Claude or in a thread
+    // Dream Claude is already part of (an earlier tag, or a comment it wrote).
+    const due = [];
+    let partOfThread = false;
     for (const i of items) {
-        if (seen.has(i.id))
-            continue;
-        // Only things written after the watch started, so turning it on doesn't replay old tags.
-        if (!i.createdDate || Date.parse(i.createdDate) < Date.parse(s.startedAt))
-            continue;
-        if (!isStaff(i.authorEmail, cfg))
-            continue;
-        if (!mentionsBot(i.raw, cfg))
-            continue;
-        s.seen.push(i.id);
-        seen.add(i.id);
-        const m = {
-            seq: s.nextSeq++, id: i.id, kind: i.kind, noteId, commentKey: i.commentKey,
-            authorEmail: i.authorEmail, createdDate: i.createdDate, text: htmlToText(i.raw), subject,
-            timelines, thread, queuedAt: new Date().toISOString(),
-        };
-        s.queue.push(m);
-        out.push(m);
+        const mentioned = mentionsBot(i.raw, cfg);
+        const isBot = i.authorEmail.trim().toLowerCase() === cfg.botEmail;
+        const fresh = !seen.has(i.id)
+            // Only things written after the watch started, so turning it on doesn't replay old tags.
+            && !!i.createdDate && Date.parse(i.createdDate) >= Date.parse(s.startedAt)
+            && isStaff(i.authorEmail, cfg);
+        if (fresh && (mentioned || partOfThread))
+            due.push({ item: i, mentioned });
+        if (mentioned || isBot)
+            partOfThread = true;
     }
-    return out;
+    if (!due.length)
+        return [];
+    // One answer per thread per event: the latest item, with the whole thread as context.
+    for (const d of due) {
+        s.seen.push(d.item.id);
+        seen.add(d.item.id);
+    }
+    const last = due[due.length - 1];
+    const m = {
+        seq: s.nextSeq++, id: last.item.id, kind: last.item.kind, mentioned: due.some(d => d.mentioned && d.item.authorEmail === last.item.authorEmail),
+        noteId, commentKey: last.item.commentKey,
+        authorEmail: last.item.authorEmail, createdDate: last.item.createdDate, text: htmlToText(last.item.raw), subject,
+        timelines, thread, queuedAt: new Date().toISOString(),
+    };
+    s.queue.push(m);
+    return [m];
 }
 export async function handleEvents(body, s, cfg) {
     const out = [];
     for (const ev of parseEvents(body)) {
         let result = "ignored";
         try {
-            if (/^note$/i.test(ev.type) && /^(inserted|updated)$/i.test(ev.action)) {
-                const found = await processNote(ev.key, s, cfg);
+            // A new comment on an existing note comes as NoteComment, keyed by the comment,
+            // with the note as its parent.
+            const noteKey = /^note$/i.test(ev.type) ? ev.key : /^notecomment$/i.test(ev.type) ? ev.parentKey : null;
+            if (noteKey && /^(inserted|updated)$/i.test(ev.action)) {
+                const found = await processNote(noteKey, s, cfg);
                 out.push(...found);
                 result = found.length ? `queued ${found.map(f => f.id).join(", ")}` : "no new mention";
             }
