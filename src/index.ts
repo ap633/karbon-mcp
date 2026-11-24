@@ -4,6 +4,11 @@ import http from "http";
 import { randomUUID } from "crypto";
 import { createServer } from "./server.js";
 import { startUploadWatch, watchConfigFromEnv } from "./uploadWatch.js";
+import { startMentionWatch, mentionConfigFromEnv } from "./mentionWatch.js";
+
+// Dream Claude @mentions in Karbon: off unless MENTION_WATCH_ENABLED=true (see src/mentionWatch.ts).
+const mentionConfig = mentionConfigFromEnv();
+const mentionWatch = mentionConfig ? startMentionWatch(mentionConfig) : null;
 
 // Tools live in src/server.ts; the Karbon client (auth, retries, paging,
 // write verification) in src/karbon.ts. This file is only the HTTP transport.
@@ -20,6 +25,8 @@ const httpServer = http.createServer(async (req, res) => {
   if (req.method === "OPTIONS") { res.writeHead(200); res.end(); return; }
 
   if (req.url === "/health") { res.writeHead(200); res.end("OK"); return; }
+
+  if (mentionWatch && await mentionWatch.route(req, res)) return;
 
   if (req.url === "/mcp" || req.url?.startsWith("/mcp?")) {
     const sessionId = req.headers["mcp-session-id"] as string | undefined;
